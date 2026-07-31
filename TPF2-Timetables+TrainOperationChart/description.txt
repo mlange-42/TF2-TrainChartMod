@@ -1,0 +1,148 @@
+[h1]Timetables & Train Operation Chart[/h1]
+A fork of [url=https://github.com/IncredibleHannes/TPF2-Timetables]IncredibleHannes' TPF2-Timetables[/url] that keeps all the timetable features and adds a brand-new Train Operation Chart (running diagram).
+
+[h2]Timetables[/h2]
+Timetables can be configured for each line and each station individually. There are two types of timetable constraints that can be added to a station:
+[list]
+[*] [b] Arrival/Departure[/b]: You can add arrival/departure timeslots. The train chooses the closest arrival time slot when entering the station, and then waits until the departure time.
+[*] [b] Unbunch[/b]: You can set the frequency and the mod will enforce that the trains will depart this station with the given frequency.
+[*] [b] Waypoint passing times[/b]: Set passing times for intermediate waypoints and rename them per line.
+[/list]
+Trains will depart right away when they are late without interference from the mod. The timetable mod uses the in-game stop command and can therefore only enforce longer waiting times. It won't make trains drive faster or load/unload quicker.
+
+Timetables are only working when the checkbox on the line overview is ticked.
+
+[h2]Train Operation Chart (New!)[/h2]
+A train operation chart (running diagram) shows the movement of trains on a time-distance graph:
+[list]
+[*] [b]Railway Line Presets[/b]: Create named presets (e.g. "Beijing-Shanghai HSR") and configure which stations/waypoints to display.
+[*] [b]Station Sorting[/b]: Assign sort numbers (1-256) to stations; same-numbered stations share the same horizontal reference line on the chart.
+[*] [b]Search & Filter[/b]: Quickly find stations by typing a name or keyword.
+[*] [b]Line Selection & Colors[/b]: Tick the train lines you want to show, click a line to select it, then pick a custom color for easy visual distinction.
+[*] [b]Auto-Drawing[/b]: Expanding a preset instantly draws its operation chart; all changes (station checks, sort numbers, line checks) are saved automatically. Use "Refresh" to reload timetable data and redraw.
+[*] [b]Cross-Line Trains[/b]: Through-running services are drawn as broken polylines on each line's chart - a train that passes stations outside the current preset is never connected with a straight line.
+[/list]
+
+[h2]Source[/h2]
+The source code is available on GitHub:
+[url=https://github.com/1122Q-Q/Railway-Timetable-with-Transport-Fever-2]https://github.com/1122Q-Q/Railway-Timetable-with-Transport-Fever-2[/url]
+
+[h2]Reporting bugs/Submitting feature requests[/h2]
+Please use the GitHub issues page of the repository above.
+
+[h2]Credits[/h2]
+Timetable logic, UI and game API layers are from the original mod by [url=https://github.com/IncredibleHannes/TPF2-Timetables]IncredibleHannes[/url]. The Train Operation Chart feature was developed on top of it by the author of this repository.
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------
+
+[h1]Fahrpläne & Bildfahrplan[/h1]
+Ein Fork von [url=https://github.com/IncredibleHannes/TPF2-Timetables]IncredibleHannes' TPF2-Timetables[/url], der alle Fahrplan-Funktionen behält und einen brandneuen Bildfahrplan hinzufügt.
+
+[h2]Fahrpläne[/h2]
+Die Fahrpläne können individuell für jede Linie und Station angepasst werden. Es gibt zwei Typen von Fahrplan-Bedingungen, die einer Station hinzugefügt werden können:
+[list]
+[*] [b] Arrival/Departure[/b]: Es ist möglich Ankunft/Abfahrt-Slots der Station hinzuzufügen. Der ankommende Zug entscheidet anhand der Ankunftszeit, welchen Slot er nimmt, und wartet dann bis zur Abfahrtszeit in der Station.
+[*] [b] Unbunch[/b]: Es kann eine Frequenz gesetzt werden. Der Zug fährt in der gesetzten Frequenz am Bahnhof ab.
+[*] [b] Wegpunkt-Durchfahrtszeiten[/b]: Lege Durchfahrtszeiten für Zwischenwegpunkte fest und benenne sie pro Linie um.
+[/list]
+Bei Verspätung fahren die Züge nach dem Ein- und Ausladen direkt weiter. Der Mod verwendet das Stop-Kommando aus dem Spiel und kann deshalb nur Züge länger warten lassen, jedoch keine Züge schneller fahren lassen oder die Ladezeiten beschleunigen!
+
+Damit die Fahrpläne funktionieren, muss die kleine Checkbox auf der Linienübersicht aktiviert sein!
+
+[h2]Bildfahrplan (Neu!)[/h2]
+Ein Bildfahrplan zeigt Zugbewegungen in einem Zeit-Weg-Diagramm:
+[list]
+[*] [b]Eisenbahnlinien-Presets[/b]: Erstelle benannte Presets (z.B. "Beijing-Shanghai HSR") und konfiguriere die anzuzeigenden Bahnhöfe/Wegpunkte.
+[*] [b]Bahnhof-Sortierung[/b]: Sortiernummern (1-256) zuweisen; gleich nummerierte Bahnhöfe teilen sich dieselbe horizontale Referenzlinie.
+[*] [b]Suche & Filter[/b]: Bahnhöfe schnell durch Eingabe von Namen oder Stichworten finden.
+[*] [b]Linienauswahl & Farben[/b]: Hake die anzuzeigenden Linien an, klicke eine Linie zur Auswahl an und wähle eine Farbe zur Unterscheidung.
+[*] [b]Auto-Zeichnung[/b]: Ein Preset aufklappen zeichnet sofort den Bildfahrplan; alle Änderungen (Bahnhofsauswahl, Sortiernummern, Linienauswahl) werden automatisch gespeichert. "Aktualisieren" lädt Fahrplandaten neu und zeichnet neu.
+[*] [b]Durchgehende Züge[/b]: Durchläufer werden auf jeder Liniengrafik als gebrochene Polylinien dargestellt - ein Zug, der Bahnhöfe außerhalb des aktuellen Presets passiert, wird niemals mit einer geraden Linie verbunden.
+[/list]
+
+[h2]Quellcode[/h2]
+Der Quellcode ist auf GitHub verfügbar:
+[url=https://github.com/1122Q-Q/Railway-Timetable-with-Transport-Fever-2]https://github.com/1122Q-Q/Railway-Timetable-with-Transport-Fever-2[/url]
+
+[h2]Fehler melden / Feature-Wünsche[/h2]
+Bitte nutze die GitHub-Issues-Seite des obigen Repositories.
+
+[h2]Danksagung[/h2]
+Fahrplan-Logik, UI und Game-API-Schicht stammen vom Originalmod von [url=https://github.com/IncredibleHannes/TPF2-Timetables]IncredibleHannes[/url]. Der Bildfahrplan wurde darauf aufbauend vom Autor dieses Repositories entwickelt.
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------
+
+[h1]Расписание & График[/h1]
+Форк мода [url=https://github.com/IncredibleHannes/TPF2-Timetables]TPF2-Timetables[/url] от IncredibleHannes, сохраняющий все функции расписаний и добавляющий новый график движения поездов.
+
+[h2]Расписания[/h2]
+Расписания могут настраиваться для каждой линии и станции отдельно. Есть два варианта регулировки, которые могут быть добавлены для каждой станции:
+[list]
+[*] [b] Прибытие/Отправление[/b]: Вы можете добавлять время прибытия/отправления поездов. Поезд выберет ближайшее время в существующем расписании по прибытии на станцию, а затем адаптируется под него.
+[*] [b] Интервал[/b]: Вы можете установить временной отрезок, и составы будут двигаться с указанным интервалом.
+[*] [b] Время прохождения путевых точек[/b]: Задавайте время прохождения промежуточных путевых точек и переименовывайте их для каждой линии.
+[/list]
+Если поезда отстают от расписания, они будут отправляться сразу после загрузки. Поскольку мод построен на игровой механике остановок, он влияет только на неё. Он не может заставить поезда двигаться быстрее или медленнее или ускорять загрузку пассажиров.
+
+Расписания работают только тогда, когда установлена галочка в меню действующих линий.
+
+[h2]График движения (Новое!)[/h2]
+График движения показывает перемещение поездов в координатах время-расстояние:
+[list]
+[*] [b]Пресеты железнодорожных линий[/b]: Создавайте именованные пресеты (например, "Beijing-Shanghai HSR") и настраивайте отображаемые станции/путевые точки.
+[*] [b]Сортировка станций[/b]: Назначайте номера сортировки (1-256); станции с одинаковым номером объединяются на одну горизонтальную опорную линию.
+[*] [b]Поиск и фильтр[/b]: Быстро находите станции по имени или ключевому слову.
+[*] [b]Выбор линий и цвета[/b]: Отмечайте линии для отображения, кликайте по линии для выбора и подбирайте свой цвет для наглядности.
+[*] [b]Автоотрисовка[/b]: Раскрытие пресета мгновенно рисует график; все изменения (выбор станций, номера сортировки, выбор линий) сохраняются автоматически. Кнопка "Обновить" перезагружает данные и перерисовывает график.
+[*] [b]Сквозные поезда[/b]: Сквозные рейсы рисуются на графике каждой линии как разорванные ломаные - поезд, проходящий станции вне текущего пресета, никогда не соединяется прямой линией.
+[/list]
+
+[h2]Исходный код[/h2]
+Исходный код доступен на GitHub:
+[url=https://github.com/1122Q-Q/Railway-Timetable-with-Transport-Fever-2]https://github.com/1122Q-Q/Railway-Timetable-with-Transport-Fever-2[/url]
+
+[h2]Сообщения о багах / Предложения по улучшению[/h2]
+Пожалуйста, используйте раздел Issues на странице репозитория выше.
+
+[h2]Благодарность[/h2]
+Логика расписаний, интерфейс и слой игрового API принадлежат оригинальному моду [url=https://github.com/IncredibleHannes/TPF2-Timetables]IncredibleHannes[/url]. График движения разработан поверх него автором этого репозитория.
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------
+
+[h1]时刻表&运行图[/h1]
+本模组是 [url=https://github.com/IncredibleHannes/TPF2-Timetables]IncredibleHannes 的 TPF2-Timetables[/url] 的一个分支，保留了全部时刻表功能，并新增了全新的列车运行图功能。
+
+[h2]时刻表[/h2]
+时刻表可以为每条线路、每个车站单独配置。一个车站可以添加两种类型的约束：
+[list]
+[*] [b]到发时间[/b]：为车站添加到发时间槽位。列车进站时选择最接近的到达时间槽，并等待至发车时间。
+[*] [b]防聚集[/b]：设置发车频率，模组将强制列车按该频率从车站发车。
+[*] [b]路径点通过时间[/b]：为中间路径点设置通过时间，并可按线路重命名。
+[/list]
+列车晚点时将在装卸完毕立即发车，模组不会干扰。时刻表基于游戏自带的停靠指令，因此只能强制更长的等待时间，无法让列车加速或加快装卸。
+
+时刻表仅在"线路总览"界面勾选启用时生效。
+
+[h2]列车运行图（新功能！）[/h2]
+在时间-距离坐标系中绘制列车运行折线图：
+[list]
+[*] [b]铁路线配置[/b]：创建命名预设（如"京沪高铁"），配置要显示的车站和路径点。
+[*] [b]车站排序[/b]：为车站分配排序号（1-256），相同序号的站合并到同一水平参考线。
+[*] [b]搜索过滤[/b]：输入站名或关键字快速筛选车站。
+[*] [b]线路勾选与颜色[/b]：勾选要显示的线路，点击线路名选中后可为选中线路统一设置自定义颜色，便于区分。
+[*] [b]自动绘图[/b]：展开铁路线配置立即绘制其运行图；所有改动（车站勾选、排序号、线路勾选）自动保存。点击"刷新"重新读取时刻表数据并重绘。
+[*] [b]跨线车次[/b]：跨线车次在每条线的运行图上以断开折线显示——车次经过当前配置纵轴上没有的车站时，绝不会被错误地直线连接。
+[/list]
+
+[h2]源代码[/h2]
+源代码已在 GitHub 开源：
+[url=https://github.com/1122Q-Q/Railway-Timetable-with-Transport-Fever-2]https://github.com/1122Q-Q/Railway-Timetable-with-Transport-Fever-2[/url]
+
+[h2]报告问题 / 提交需求[/h2]
+请使用上述仓库的 GitHub Issues 页面。
+
+[h2]致谢[/h2]
+时刻表逻辑、UI 与游戏 API 层来自原版模组 [url=https://github.com/IncredibleHannes/TPF2-Timetables]IncredibleHannes[/url]。运行图功能由本仓库作者在其基础上开发。

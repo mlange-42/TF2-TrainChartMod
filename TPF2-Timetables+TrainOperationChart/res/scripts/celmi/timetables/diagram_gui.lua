@@ -1,0 +1,1522 @@
+local timetable = require "celmi/timetables/timetable"
+local timetableHelper = require "celmi/timetables/timetable_helper"
+
+local diagramGUI = {}
+
+local menu = {
+    window = nil, lineRenderViews = {}, stationLabels = {}, timeLabels = {},
+    stationLabelViews = {}, timeLabelViews = {},
+    lineListLayout = nil, lineScrollArea = nil,
+    presetScrollArea = nil,
+}
+
+local allStations = {}
+local allLines = {}
+local displayedLines = {}
+local expandedPresetId = nil
+local currentPresetRef = nil
+local stationRowGroups = {}
+local localPresets = {}  -- {id = {id, name, stationData}, ...}, runtime source of truth
+local stationFilterText = ""
+-- 新增预设后要把列表滚动到新预设表头（从视口顶部开始展示），rebuildPresetList 记录对应行
+local pendingScrollPresetId = nil
+local pendingScrollPresetRow = nil
+
+-- 前向声明：以下函数以赋值形式定义（xxx = function ... end），且可能在声明之前被
+-- 其它函数的闭包引用。Lua 局部变量只在声明之后可见，不加前向声明会导致引用解析为全局 nil
+-- （"attempt to call global 'xxx' (a nil value)"）。
+local rebuildPresetList
+local saveCurrentPreset
+
+-- 组件名计数器：必须跨刷新周期唯一（AGENTS.md: removeItem 移除的组件名可能未被
+-- 引擎即时释放，同名重建会冲突）。每次刷新创建站名/时间标签时递增，永不重复。
+-- 存 _G 而非 local：模块级 local 不抗 Lua VM 重载，_G 可跨模块重载存活。
+local function nextLabelName()
+    if not _G._diagramLabelCounter then _G._diagramLabelCounter = 0 end
+    _G._diagramLabelCounter = _G._diagramLabelCounter + 1
+    return _G._diagramLabelCounter
+end
+
+local WINDOW_WIDTH = 1200
+local WINDOW_HEIGHT = 780
+local TITLE_BAR_H = 30
+local STATION_PANEL_WIDTH = 280
+local TIME_LABEL_HEIGHT = 30
+local STATION_LABEL_WIDTH = 150
+
+local LINE_COLORS = {
+    {1.0, 0.2, 0.2, 1.0}, {0.2, 0.6, 1.0, 1.0},
+    {0.2, 1.0, 0.4, 1.0}, {1.0, 0.8, 0.2, 1.0},
+    {0.8, 0.2, 1.0, 1.0}, {1.0, 0.6, 0.2, 1.0},
+    {0.6, 0.8, 0.2, 1.0}, {0.2, 0.8, 0.8, 1.0},
+    {0.8, 0.6, 0.8, 1.0}, {0.6, 0.6, 0.6, 1.0},
+    {1.0, 0.5, 0.5, 1.0}, {0.5, 0.8, 0.5, 1.0},
+}
+
+local function getColor(index)
+    local c = LINE_COLORS[(index - 1) % #LINE_COLORS + 1]
+    return api.type.Vec4f.new(c[1], c[2], c[3], c[4])
+end
+
+local function debugPrint(msg) print("[DiagramGUI] " .. msg) end
+
+local D = {
+    title = _("diagram_title_i18n"),
+    title_short = _("diagram_title_short_i18n"),
+    refresh = _("diagram_refresh_i18n"),
+    color = _("diagram_color_i18n"),
+    choose_color = _("diagram_choose_color_i18n"),
+    no_presets = _("diagram_no_presets_i18n"),
+    confirm_delete = _("diagram_confirm_delete_i18n"),
+    warning = _("diagram_warning_i18n"),
+    confirm = _("diagram_confirm_i18n"),
+    cancel = _("diagram_cancel_i18n"),
+    sort = _("diagram_sort_i18n"),
+    preset = _("diagram_preset_i18n"),
+    railway_lines = _("diagram_railway_lines_i18n"),
+    train_list = _("diagram_train_list_i18n"),
+    search = _("diagram_search_i18n"),
+}
+
+local function getConfig()
+    local cfg = timetable.getDiagramConfig()
+    if not cfg then cfg = {}; timetable.setDiagramConfig(cfg) end
+    return cfg
+end
+
+local function saveConfig(cfg) timetable.setDiagramConfig(cfg or {}) end
+
+local function getLineColor(lineID)
+    local cfg = getConfig()
+    if cfg.lineColors and cfg.lineColors[tostring(lineID)] then
+        local c = cfg.lineColors[tostring(lineID)]
+        return api.type.Vec4f.new(c[1], c[2], c[3], c[4])
+    end
+    return nil
+end
+
+local function saveLineColor(lineID, color)
+    local cfg = getConfig()
+    if not cfg.lineColors then cfg.lineColors = {} end
+    cfg.lineColors[tostring(lineID)] = {color.x, color.y, color.z, color.w}
+    saveConfig(cfg)
+end
+
+local function getHostLineKey(to)
+    local cfg = getConfig()
+    local stored = cfg._hostLineId
+    if stored and to[stored] and to[stored].dp and to[stored].dp.presetList and #to[stored].dp.presetList > 0 then
+        return stored
+    end
+    local keys = {}
+    for k, v in pairs(to) do
+        local n = tonumber(k)
+        if n and n > 0 and type(v) == "table" and v.dp and v.dp.presetList and #v.dp.presetList > 0 then
+            table.insert(keys, n)
+        end
+    end
+    table.sort(keys)
+    if #keys > 0 then
+        local chosen = tostring(keys[1])
+        cfg._hostLineId = chosen; saveConfig(cfg)
+        return chosen
+    end
+    if stored and to[stored] then return stored end
+    for k, v in pairs(to) do
+        if tonumber(k) and tonumber(k) > 0 then
+            cfg._hostLineId = k; saveConfig(cfg)
+            return k
+        end
+    end
+    return nil
+end
+
+-- Runtime: localPresets is source of truth. Persistence via timetableObject.
+local function getPresetList() return localPresets end
+local function setPresetList(list) localPresets = list or {} end
+
+local function getActivePresetId() return getConfig()._activePresetId or "" end
+local function setActivePresetId(id)
+    local cfg = getConfig(); cfg._activePresetId = id or ""; saveConfig(cfg)
+end
+
+local function loadPresetsFromTimetableObject()
+    localPresets = {}
+    local to = timetable.getTimetableObject()
+    local host = getHostLineKey(to)
+    if host and to[host].dp then
+        local dp = to[host].dp
+        if dp.presetList then
+            for i, p in ipairs(dp.presetList) do
+                local sdCopy = {}
+                if p.stationData then
+                    for k, v in pairs(p.stationData) do
+                        sdCopy[k] = {selected = v.selected or false, sort = (type(v.sort) == "number" and v.sort > 0 and v.sort <= 255) and v.sort or 256}
+                    end
+                end
+                local ldCopy = {}
+                if p.lineData then
+                    for k, v in pairs(p.lineData) do ldCopy[k] = v end
+                end
+                table.insert(localPresets, {id = tostring(i), name = p.name, stationData = sdCopy, lineData = ldCopy})
+            end
+        end
+        getConfig()._activePresetId = dp.activePresetId or ""
+        if dp.colorList then
+            local cfg = getConfig()
+            if not cfg.lineColors then cfg.lineColors = {} end
+            for _, entry in pairs(dp.colorList) do
+                cfg.lineColors[entry.i] = {entry.r, entry.g, entry.b, entry.a}
+            end
+        end
+        debugPrint("loadPresets: " .. #localPresets .. " from line " .. host .. ".dp")
+    else
+        debugPrint("loadPresets: no host line with dp")
+    end
+end
+
+local function savePresetsToTimetableObject()
+    local to = timetable.getTimetableObject()
+    if not to then return end
+    local host = getHostLineKey(to)
+    if not host then
+        debugPrint("savePresets: no host line found")
+        return
+    end
+    local dp = to[host].dp
+    if not dp then dp = {}; to[host].dp = dp end
+        dp.presetList = {}
+    for _, p in pairs(localPresets) do
+        local sdCount = 0
+        local sdCopy = {}
+        if p.stationData then
+            for k, v in pairs(p.stationData) do
+                sdCount = sdCount + 1
+                sdCopy[k] = {selected = v.selected or false, sort = (type(v.sort) == "number" and v.sort > 0 and v.sort <= 255) and v.sort or 256}
+            end
+        end
+        local ldCopy = {}
+        if p.lineData then
+            for k, v in pairs(p.lineData) do ldCopy[k] = v end
+        end
+        debugPrint("savePresets: preset " .. p.id .. "=" .. p.name .. " stationData entries=" .. sdCount)
+        table.insert(dp.presetList, {id = p.id, name = p.name, stationData = sdCopy, lineData = ldCopy})
+    end
+    dp.activePresetId = getActivePresetId()
+    dp.colorList = {}
+    for _, ld in pairs(allLines) do
+        if ld.color then
+            local c = ld.color
+            table.insert(dp.colorList, {i = tostring(ld.id), r = c.x, g = c.y, b = c.z, a = c.w})
+        end
+    end
+    debugPrint("savePresets: saved " .. #localPresets .. " to line " .. host .. ".dp")
+
+    for k, v in pairs(to) do
+        if k ~= host and type(v) == "table" and v.dp and v.dp.presetList then
+            v.dp.presetList = nil
+        end
+    end
+
+    local cfg = getConfig()
+    cfg._activePresetId = getActivePresetId()
+    saveConfig(cfg)
+    _G._diagramForceSync = true
+end
+
+local function findPresetById(id)
+    for _, p in pairs(localPresets) do
+        if p.id == id then return p end
+    end
+    return nil
+end
+
+local function getActivePreset()
+    local id = getActivePresetId()
+    if id and #id > 0 then return findPresetById(id) end
+    return nil
+end
+
+local function getActivePresetName()
+    local p = getActivePreset()
+    return p and p.name or ""
+end
+
+local function timeToSeconds(min, sec) return min * 60 + sec end
+
+local function secondsToX(seconds, width)
+    return ((seconds % 3600) / 3600) * width
+end
+
+local function stationToY(idx, total, height)
+    if total <= 1 then return height / 2 end
+    return (1 - (idx - 1) / (total - 1)) * height
+end
+
+local function sortAllStations()
+    table.sort(allStations, function(a, b)
+        if a.selected ~= b.selected then return a.selected end
+        if a.selected then
+            local sa = a.sort or 1
+            local sb = b.sort or 1
+            if sa ~= sb then return sa < sb end
+        end
+        return string.lower(a.name) < string.lower(b.name)
+    end)
+end
+
+local function getAllTimetableData()
+    local data = {}
+    for _, lineInfo in pairs(timetableHelper.getAllRailLines()) do
+        local lineID = lineInfo.id
+        -- 运行图只显示铁路线（时刻表显示所有线路，故筛选只在运行图侧做）。
+        -- 用反向过滤：排除明确非铁路（公交/电车/水路/航空）的线；空线路保守保留，避免误删。
+        local isNonRail = timetableHelper.lineHasType(lineID, "ROAD")
+            or timetableHelper.lineHasType(lineID, "TRAM")
+            or timetableHelper.lineHasType(lineID, "WATER")
+            or timetableHelper.lineHasType(lineID, "AIR")
+        if isNonRail then
+            goto continueLine
+        end
+        local stops = timetableHelper.getAllStops(lineID)
+        local stCount = 0
+        local wpCount = 0
+        for _, si in ipairs(stops) do
+            if si.type == "station" then stCount = stCount + 1
+            elseif si.type == "waypoint" then wpCount = wpCount + 1 end
+        end
+        if stCount > 0 or wpCount > 0 then
+            debugPrint("LINE " .. tostring(lineID) .. " '" .. lineInfo.name .. "' stops=" .. #stops .. " stations=" .. stCount .. " waypoints=" .. wpCount)
+        end
+        local savedColor = getLineColor(lineID)
+        local lineData = {
+            id = lineID, name = lineInfo.name, stations = {},
+            color = savedColor or getColor(#data + 1),
+            selected = false, bold = false, checked = true,
+        }
+        for flatIdx, stopInfo in ipairs(stops) do
+            local displayName = stopInfo.name
+            local gk = stopInfo.gwKey
+            if stopInfo.type == "waypoint" then
+                if gk then
+                    local gn = timetable.getGlobalWaypointName(gk)
+                    if gn then displayName = gn end
+                end
+                if not gk or not timetable.getGlobalWaypointName(gk) then
+                    local cn = timetable.getWaypointName(lineID, stopInfo.id)
+                    if cn then displayName = cn end
+                end
+            end
+            local uk = tostring(stopInfo.id) .. "_" .. tostring(lineID)
+            local entry = { id = stopInfo.id, entityId = stopInfo.entityId, uniqueKey = uk,
+                name = displayName, stopType = stopInfo.type, times = {},
+                gwKey = gk }
+            if stopInfo.type == "station" then
+                local ct = timetable.getConditionType(lineID, stopInfo.stopIndex)
+                if ct == "ArrDep" then
+                    entry.times = timetable.getConditions(lineID, stopInfo.stopIndex, "ArrDep") or {}
+                end
+            else
+                local wt = timetable.getWaypointPassingTime(lineID, stopInfo.id)
+                if wt and #wt > 0 then
+                    for _, t in ipairs(wt) do
+                        entry.times[#entry.times + 1] = {t[1], t[2], t[1], t[2]}
+                    end
+                end
+            end
+            lineData.stations[flatIdx] = entry
+        end
+        table.insert(data, lineData)
+        ::continueLine::
+    end
+    return data
+end
+
+local function stableKey(stopType, id, uniqueKey, entityId)
+    if stopType == "station" then return "s_" .. tostring(id) end
+    return "wp_" .. tostring(entityId or id)
+end
+
+local function getAllStationsFlat(lineDataList)
+    local list = {}
+    local seen = {}
+    local totalStations = 0
+    local totalWaypoints = 0
+    for _, ld in pairs(lineDataList) do
+        for _, st in pairs(ld.stations) do
+            local key = stableKey(st.stopType, st.id, st.uniqueKey, st.entityId)
+            if not seen[key] then
+                seen[key] = true
+                local dn = st.name
+                if st.stopType == "waypoint" then
+                    dn = "▶ " .. dn; totalWaypoints = totalWaypoints + 1
+                else
+                    totalStations = totalStations + 1
+                end
+                table.insert(list, {
+                    id = st.id, entityId = st.entityId, uniqueKey = st.uniqueKey, name = dn,
+                    selected = false, sort = 256, stopType = st.stopType,
+                    sourceLineID = ld.id, sourceLineName = ld.name,
+                })
+            end
+        end
+    end
+    local mapAdded = 0
+    local allMapStations = timetableHelper.getAllStationEntities()
+    for _, ms in ipairs(allMapStations) do
+        local key = "s_" .. tostring(ms.id)
+        if not seen[key] then
+            seen[key] = true
+            mapAdded = mapAdded + 1
+            totalStations = totalStations + 1
+            table.insert(list, {
+                id = ms.id, entityId = nil, uniqueKey = "map_" .. tostring(ms.id),
+                name = ms.name, selected = false, sort = 256, stopType = "station",
+                sourceLineID = nil, sourceLineName = nil,
+            })
+        end
+    end
+    debugPrint("getAllStationsFlat: totalLines=" .. #lineDataList .. " uniqueStations=" .. totalStations .. " uniqueWaypoints=" .. totalWaypoints .. " mapOnlyAdded=" .. mapAdded)
+    return list
+end
+
+local function getSelectedStationList()
+    local r = {}
+    for _, s in pairs(allStations) do if s.selected then table.insert(r, s) end end
+    return r
+end
+
+local function getRelevantLines(selList)
+    local keys = {}
+    local entityIds = {}
+    local wpEntityIds = {}
+    for _, s in pairs(selList) do
+        keys[s.uniqueKey] = true
+        if s.stopType == "station" then
+            entityIds[tostring(s.id)] = true
+        end
+        if s.stopType == "waypoint" and s.entityId then
+            wpEntityIds[s.entityId] = true
+        end
+    end
+    local r = {}
+    for _, ld in pairs(allLines) do
+        for _, st in pairs(ld.stations) do
+            local match = keys[st.uniqueKey]
+            if not match and st.stopType == "station" then
+                match = entityIds[tostring(st.id)]
+            end
+            if not match and st.stopType == "waypoint" and st.entityId then
+                match = wpEntityIds[st.entityId]
+            end
+            if match then
+                table.insert(r, ld); break
+            end
+        end
+    end
+    -- 固定车次列表顺序：allLines 来自 pairs(lineSystem.getLines())，跨调用顺序不确定，
+    -- 不排序会导致每次刷新线路随机跳位（"勾选的线路消失"的视觉假象）。按线路 ID 稳定排序。
+    table.sort(r, function(a, b)
+        local na, nb = tonumber(a.id), tonumber(b.id)
+        if na and nb then return na < nb end
+        return tostring(a.id) < tostring(b.id)
+    end)
+    return r
+end
+
+local function createColorChooserButton(lineData, onSelected)
+    local btn = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.color), true)
+    btn:setStyleClassList({"timetable-avtivateTimetableButton"})
+    btn:setEnabled(lineData.selected)
+    lineData.colorButton = btn
+    btn:onClick(function()
+        local cp = api.gui.comp.ColorPicker.new()
+        cp:onColorChanged(function(c)
+            lineData.color = api.type.Vec4f.new(c.x, c.y, c.z, 1.0)
+            saveLineColor(lineData.id, lineData.color)
+            local to = timetable.getTimetableObject()
+            local host = getHostLineKey(to)
+            if host and to[host].dp then
+                if not to[host].dp.colorList then to[host].dp.colorList = {} end
+                local found = false
+                for _, entry in pairs(to[host].dp.colorList) do
+                    if entry.i == tostring(lineData.id) then
+                        entry.r = c.x; entry.g = c.y; entry.b = c.z; entry.a = 1.0
+                        found = true; break
+                    end
+                end
+                if not found then
+                    table.insert(to[host].dp.colorList, {i = tostring(lineData.id), r = c.x, g = c.y, b = c.z, a = 1.0})
+                end
+            end
+            _G._diagramForceSync = true
+            onSelected()
+        end)
+        local okW, w = pcall(function() return api.gui.comp.Window.new(D.choose_color, cp) end)
+        if okW and w then w:addHideOnCloseHandler(); w:setMovable(true); w:setPosition(300, 200) end
+    end)
+    return btn
+end
+
+local function getYMap(selList, h)
+    local labelGroups = {}
+    local labelDedup = {}
+    for _, s in pairs(selList) do
+        local sort = s.sort or 1
+        if not labelGroups[sort] then labelGroups[sort] = {}; labelDedup[sort] = {} end
+        local dk = stableKey(s.stopType, s.id, s.uniqueKey, s.entityId)
+        if not labelDedup[sort][dk] then
+            labelDedup[sort][dk] = true
+            table.insert(labelGroups[sort], s)
+        end
+    end
+    local sorts = {}
+    for k, _ in pairs(labelGroups) do table.insert(sorts, tonumber(k)) end
+    table.sort(sorts)
+    local map = {}
+    for i, sv in ipairs(sorts) do
+        local y = stationToY(i, #sorts, h)
+        for _, s in pairs(labelGroups[sv]) do
+            if s.stopType == "station" then
+                local eid = tostring(s.id)
+                for _, ld in pairs(allLines) do
+                    for _, st in pairs(ld.stations) do
+                        if st.stopType == "station" and tostring(st.id) == eid then
+                            map[st.uniqueKey] = y
+                        end
+                    end
+                end
+            else
+                if s.entityId then
+                    for _, ld in pairs(allLines) do
+                        for _, st in pairs(ld.stations) do
+                            if st.stopType == "waypoint" and st.entityId == s.entityId then
+                                map[st.uniqueKey] = y
+                            end
+                        end
+                    end
+                else
+                    map[s.uniqueKey] = y
+                end
+            end
+        end
+    end
+    return map, labelGroups, sorts
+end
+
+-- 清除运行图渲染区（折线视图 + 站名标签 + 时间标签），全部 pcall 保护。
+local function clearDiagramViews()
+    if menu.renderLayout then
+        for _, v in pairs(menu.lineRenderViews) do
+            pcall(function() menu.renderLayout:removeItem(v) end)
+        end
+    end
+    menu.lineRenderViews = {}
+    if menu.stationLabels and menu.stationLabels.layout then
+        for _, oldCont in ipairs(menu.stationLabelViews) do
+            pcall(function() menu.stationLabels.layout:removeItem(oldCont) end)
+        end
+    end
+    menu.stationLabelViews = {}
+    if menu.timeLabels and menu.timeLabels.layout then
+        for _, oldCont in ipairs(menu.timeLabelViews) do
+            pcall(function() menu.timeLabels.layout:removeItem(oldCont) end)
+        end
+    end
+    menu.timeLabelViews = {}
+end
+
+local function refreshDiagram()
+    debugPrint("refreshDiagram start")
+    if not menu.renderLayout then debugPrint("refreshDiagram: no renderLayout"); return end
+    local selList = getSelectedStationList()
+    if #selList == 0 then
+        -- 勾选车站少于1个：不绘制，并清除残留的上一次运行图（含上一预设的折线/标签），
+        -- 避免展开空预设后仍显示过期图形造成误导。
+        clearDiagramViews()
+        debugPrint("refreshDiagram: no stations selected, cleared")
+        return
+    end
+
+    local dw = WINDOW_WIDTH - STATION_PANEL_WIDTH - STATION_LABEL_WIDTH
+    local dh = WINDOW_HEIGHT - TITLE_BAR_H - TIME_LABEL_HEIGHT
+    local yMap, groups, sorts = getYMap(selList, dh)
+
+    for _, v in pairs(menu.lineRenderViews) do
+        if menu.renderLayout then pcall(function() menu.renderLayout:removeItem(v) end) end
+    end
+    menu.lineRenderViews = {}
+
+    local function makeLRV()
+        local v = api.gui.comp.LineRenderView.new()
+        v:setMinimumSize(api.gui.util.Size.new(dw, dh))
+        v:setMaximumSize(api.gui.util.Size.new(dw, dh))
+        menu.renderLayout:addItem(v, 0.5, 0)
+        table.insert(menu.lineRenderViews, v)
+        return v
+    end
+
+    local bv = makeLRV()
+    bv:setColor(api.type.Vec4f.new(1.0, 0.2, 0.2, 1.0))
+    bv:setWidth(3)
+    bv:addLine(api.type.Vec2f.new(0, 0), api.type.Vec2f.new(dw, 0))
+    bv:addLine(api.type.Vec2f.new(0, dh), api.type.Vec2f.new(dw, dh))
+    bv:addLine(api.type.Vec2f.new(0, 0), api.type.Vec2f.new(0, dh))
+    bv:addLine(api.type.Vec2f.new(dw, 0), api.type.Vec2f.new(dw, dh))
+
+    local rv = makeLRV()
+    rv:setColor(api.type.Vec4f.new(0.5, 0.5, 0.5, 0.3))
+    rv:setWidth(1)
+    for m = 5, 55, 5 do
+        local x = secondsToX(m * 60, dw)
+        rv:addLine(api.type.Vec2f.new(x, 0), api.type.Vec2f.new(x, dh))
+    end
+    for i = 1, #sorts do
+        local y = stationToY(i, #sorts, dh)
+        rv:addLine(api.type.Vec2f.new(0, y), api.type.Vec2f.new(dw, y))
+    end
+
+    if menu.stationLabels and menu.stationLabels.layout then
+        local sll = menu.stationLabels.layout
+        for _, oldCont in ipairs(menu.stationLabelViews) do
+            pcall(function() sll:removeItem(oldCont) end)
+        end
+        menu.stationLabelViews = {}
+        local labelH = 18
+        for idx = #sorts, 1, -1 do
+            local sv = sorts[idx]
+            local groupStations = groups[sv]
+            local stationName = nil
+            if groupStations then
+                for _, s in pairs(groupStations) do
+                    if s.stopType == "station" then
+                        stationName = s.name
+                        break
+                    end
+                end
+            end
+            if stationName then
+                local nameTag = nextLabelName()
+                local ok2, result = pcall(function()
+                    local y = stationToY(idx, #sorts, dh)
+                    local label = api.gui.comp.TextView.new(stationName)
+                    label:setStyleClassList({"timetable-mono-sc"})
+                    label:setGravity(1, 0.5)
+                    local cont = api.gui.comp.Component.new("stCont_" .. sv .. "_" .. nameTag)
+                    cont:setMinimumSize(api.gui.util.Size.new(STATION_LABEL_WIDTH, labelH))
+                    cont:setMaximumSize(api.gui.util.Size.new(STATION_LABEL_WIDTH, labelH))
+                    cont:setLayout(api.gui.layout.BoxLayout.new("VERTICAL"))
+                    cont:getLayout():addItem(label)
+                    local rectY = math.max(0, math.min(dh - labelH, math.floor(y - labelH / 2)))
+                    local rect = api.gui.util.Rect.new(0, rectY, STATION_LABEL_WIDTH, labelH)
+                    sll:addItem(cont, rect)
+                    table.insert(menu.stationLabelViews, cont)
+                end)
+                if not ok2 then debugPrint("stationLabel add failed: " .. tostring(result)) end
+            end
+        end
+        debugPrint("stationLabels: " .. #menu.stationLabelViews .. " items, sorts=" .. #sorts)
+    end
+
+    if menu.timeLabels and menu.timeLabels.layout and menu.timeLabels.component then
+        pcall(function()
+            menu.timeLabels.component:invokeLater(function()
+                pcall(function()
+                    local tll = menu.timeLabels.layout
+                    if not tll then return end
+                    for _, oldCont in ipairs(menu.timeLabelViews) do
+                        pcall(function() tll:removeItem(oldCont) end)
+                    end
+                    menu.timeLabelViews = {}
+                    local raRect = menu.renderArea and menu.renderArea:getContentRect()
+                    local tlcRect = menu.timeLabels.component:getContentRect()
+                    local labelW = 44
+                    if raRect and raRect.w > 0 and tlcRect and tlcRect.w > 0 then
+                        local offsetX = raRect.x - tlcRect.x
+                        local offsetY = (raRect.y + raRect.h) - tlcRect.y
+                        debugPrint("timeLabels: ra=(x=" .. raRect.x .. " y=" .. raRect.y .. " w=" .. raRect.w .. " h=" .. raRect.h .. ") tlc=(x=" .. tlcRect.x .. " y=" .. tlcRect.y .. ") offsetX=" .. offsetX .. " offsetY=" .. offsetY)
+                        for m = 0, 55, 5 do
+                            local fx = m / 60
+                            local cx = offsetX + fx * dw
+                            local label = api.gui.comp.TextView.new(string.format("%02d:00", m))
+                            label:setStyleClassList({"timetable-mono-sc"})
+                            label:setGravity(0.5, 0.5)
+                            local nameTag = nextLabelName()
+                            local cont = api.gui.comp.Component.new("tmCont_" .. m .. "_" .. nameTag)
+                            cont:setMinimumSize(api.gui.util.Size.new(labelW, TIME_LABEL_HEIGHT))
+                            cont:setMaximumSize(api.gui.util.Size.new(labelW, TIME_LABEL_HEIGHT))
+                            cont:setLayout(api.gui.layout.BoxLayout.new("VERTICAL"))
+                            cont:getLayout():addItem(label)
+                            local rectX = math.max(0, math.min(tlcRect.w - labelW, math.floor(cx - labelW / 2)))
+                            local rectY = math.max(0, math.min(tlcRect.h - TIME_LABEL_HEIGHT, math.floor(offsetY + 14)))
+                            local rect = api.gui.util.Rect.new(rectX, rectY, labelW, TIME_LABEL_HEIGHT)
+                            tll:addItem(cont, rect)
+                            table.insert(menu.timeLabelViews, cont)
+                        end
+                    else
+                        debugPrint("timeLabels: raRect or tlcRect invalid")
+                    end
+                    debugPrint("timeLabels: " .. #menu.timeLabelViews .. " items")
+                end)
+            end)
+        end)
+    end
+
+    local drawDebug = {}
+    if #displayedLines > 0 then
+    for _ in pairs(displayedLines) do makeLRV() end
+
+    local function drawWrappedSegment(lv, t1, y1, t2, y2, lw)
+        local c1 = math.floor(t1 / 3600)
+        local c2 = math.floor(t2 / 3600)
+        if c1 == c2 then
+            local x1 = ((t1 - c1 * 3600) / 3600) * lw
+            local x2 = ((t2 - c1 * 3600) / 3600) * lw
+            lv:addLine(api.type.Vec2f.new(x1, y1), api.type.Vec2f.new(x2, y2))
+        else
+            local total = t2 - t1
+            if total <= 0 then return end
+            for c = c1, c2 do
+                local s = math.max(t1, c * 3600)
+                local e = math.min(t2, (c + 1) * 3600)
+                if e > s then
+                    local f1 = (s - t1) / total
+                    local f2 = (e - t1) / total
+                    local cy1 = y1 + f1 * (y2 - y1)
+                    local cy2 = y1 + f2 * (y2 - y1)
+                    local cx1 = ((s - c * 3600) / 3600) * lw
+                    local cx2 = ((e - c * 3600) / 3600) * lw
+                    lv:addLine(api.type.Vec2f.new(cx1, cy1), api.type.Vec2f.new(cx2, cy2))
+                end
+            end
+        end
+    end
+
+    for li, ld in pairs(displayedLines) do
+        if not ld.checked then goto continueLine end
+        table.insert(drawDebug, ld.name)
+        local lv = menu.lineRenderViews[li + 2]
+        if lv then
+            lv:setColor(ld.color)
+            local lw = ld.bold and 4 or 2
+            local maxG = 0
+            for __, st in pairs(ld.stations) do
+                if st.times and #st.times > maxG then maxG = #st.times end
+            end
+            if maxG == 0 then maxG = 1 end
+            for g = 1, maxG do
+                local polylines = {}
+                local cur = {}
+                local timeOffset = 0
+                local prevDep = nil
+                for fIdx = 1, #ld.stations do
+                    local st = ld.stations[fIdx]
+                    if st then
+                        local y = yMap[st.uniqueKey]
+                        if not y then
+                            -- 该停站不在当前运行图纵轴上
+                            -- 车站：跨线车次的异线车站 → 方案A断开折线
+                            -- 路径点：仅"沿轨道经过"的路径控制点 → 静默跳过（不添加点也不断开）
+                            if st.stopType == "station" then
+                                if #cur > 0 then
+                                    polylines[#polylines + 1] = cur
+                                    cur = {}
+                                end
+                            end
+                        else
+                            local t = nil
+                            if st.times and #st.times >= g then
+                                t = st.times[g]
+                            end
+                            if t then
+                                local arr = t[1] * 60 + t[2]
+                                local dep = t[3] * 60 + t[4]
+                                if prevDep and (timeOffset + arr) < prevDep then
+                                    timeOffset = timeOffset + 3600
+                                end
+                                local uwArr = timeOffset + arr
+                                local uwDep = timeOffset + dep
+                                if uwDep < uwArr then
+                                    uwDep = uwDep + 3600
+                                end
+                                if fIdx > 1 then
+                                    table.insert(cur, {uw = uwArr, y = y})
+                                end
+                                local isTerminalReturn = (ld.stations[1] and st.uniqueKey == ld.stations[1].uniqueKey) and (fIdx == #ld.stations)
+                                if not isTerminalReturn then
+                                    table.insert(cur, {uw = uwDep, y = y})
+                                    prevDep = uwDep
+                                else
+                                    prevDep = uwArr
+                                end
+                            end
+                        end
+                    end
+                end
+                if #cur > 0 then
+                    polylines[#polylines + 1] = cur
+                end
+
+                -- 循环闭合：连接最后一折线的末端到下一周期始发站的到达
+                if #polylines > 0 and #ld.stations >= 1 then
+                    local firstSt = ld.stations[1]
+                    local lastSt = ld.stations[#ld.stations]
+                    local firstY = yMap[firstSt.uniqueKey]
+                    local lastY = yMap[lastSt.uniqueKey]
+                    if firstY and firstY ~= lastY then
+                        local nextG = (g % maxG) + 1
+                        if firstSt.times and #firstSt.times >= nextG then
+                            local t = firstSt.times[nextG]
+                            if t then
+                                local arr = t[1] * 60 + t[2]
+                                if (timeOffset + arr) < prevDep then
+                                    timeOffset = timeOffset + 3600
+                                end
+                                local uwArr = timeOffset + arr
+                                local lastPl = polylines[#polylines]
+                                table.insert(lastPl, {uw = uwArr, y = firstY})
+                                if g < maxG then
+                                    local dep = t[3] * 60 + t[4]
+                                    local uwDep = timeOffset + dep
+                                    if uwDep < uwArr then
+                                        uwDep = uwDep + 3600
+                                    end
+                                    table.insert(lastPl, {uw = uwDep, y = firstY})
+                                end
+                            end
+                        end
+                    end
+                end
+
+                lv:setWidth(lw)
+                for _, pl in ipairs(polylines) do
+                    for i = 1, #pl - 1 do
+                        drawWrappedSegment(lv, pl[i].uw, pl[i].y, pl[i+1].uw, pl[i+1].y, dw)
+                    end
+                end
+                lv:setWidth(lw + 2)
+                for _, pl in ipairs(polylines) do
+                    for __, p in pairs(pl) do
+                        local nx = ((p.uw % 3600) / 3600) * dw
+                        lv:addLine(api.type.Vec2f.new(nx - 2, p.y), api.type.Vec2f.new(nx + 2, p.y))
+                        lv:addLine(api.type.Vec2f.new(nx, p.y - 2), api.type.Vec2f.new(nx, p.y + 2))
+                    end
+                end
+            end
+        end
+        ::continueLine::
+    end
+    end  -- if #displayedLines > 0
+    debugPrint("draw names: " .. table.concat(drawDebug, ", "))
+end
+
+local function toggleLineSelection(idx)
+    local ld = displayedLines[idx]
+    if ld then
+        ld.selected = not ld.selected; ld.bold = ld.selected
+        if ld.nameView then
+            pcall(function()
+                ld.nameView:setText(ld.bold and ("[" .. ld.name .. "]") or ld.name, false)
+            end)
+        end
+        pcall(function() refreshDiagram() end)
+    end
+end
+
+-- setContent 会把内容视图复位到顶部，但可能保留旧的滚动条值，导致"内容在顶、滚动条在底"的错位
+-- （setScrollOffset 传相同值不会触发重新同步）。这里先归零再设目标值，强制引擎重新同步；
+-- 若初始捕获失败，布局完成后再补捕获。双重 invokeLater 等布局完成。
+local function restoreScrollOffset(area, offset)
+    if not area then return end
+    area:invokeLater(function()
+        area:invokeLater(function()
+            pcall(function()
+                local target = offset
+                if not target then
+                    local tmp = area:getScrollOffset()
+                    if tmp then target = api.type.Vec2i.new(tmp.x, tmp.y) end
+                end
+                if target then
+                    area:setScrollOffset(api.type.Vec2i.new(0, 0))
+                    area:setScrollOffset(target)
+                end
+            end)
+        end)
+    end)
+end
+
+local function updateLineList()
+    if not menu.lineScrollArea then return end
+    local prevOffset = nil
+    pcall(function()
+        local tmp = menu.lineScrollArea:getScrollOffset()
+        prevOffset = api.type.Vec2i.new(tmp.x, tmp.y)
+    end)
+    local nc = api.gui.comp.Component.new("lineList")
+    local nl = api.gui.layout.BoxLayout.new("VERTICAL")
+    nc:setLayout(nl)
+    debugPrint("updateLineList: " .. #displayedLines .. " lines")
+    local lineCount = 0
+    local lineListDebug = {}
+    for li, ld in pairs(displayedLines) do
+        lineCount = lineCount + 1
+        table.insert(lineListDebug, ld.name)
+        local ic = api.gui.comp.Component.new("lineItem_" .. li)
+        local il = api.gui.layout.BoxLayout.new("HORIZONTAL")
+        ic:setLayout(il)
+        ic:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 42))
+        ic:setMaximumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 42))
+
+        local ckImg = api.gui.comp.ImageView.new(ld.checked and "ui/checkbox1.tga" or "ui/checkbox0.tga")
+        local ckBtn = api.gui.comp.Button.new(ckImg, true)
+        ckBtn:onClick(function()
+            ld.checked = not ld.checked
+            pcall(function() ckImg:setImage(ld.checked and "ui/checkbox1.tga" or "ui/checkbox0.tga", false) end)
+            pcall(function() refreshDiagram() end)
+            -- 勾选/取消勾选线路后立即保存到当前预设（内部会触发 _diagramForceSync 同步），
+            -- 避免直接退出游戏/关窗时勾选状态丢失（"保存不上"）。
+            if currentPresetRef then
+                local okSave, saveErr = pcall(function()
+                    saveCurrentPreset()
+                    savePresetsToTimetableObject()
+                end)
+                if not okSave then debugPrint("lineCheck SAVE ERROR: " .. tostring(saveErr)) end
+            end
+        end)
+        il:addItem(ckBtn)
+
+        local displayText = ld.bold and ("[" .. ld.name .. "]") or ld.name
+        local nameTv = api.gui.comp.TextView.new(displayText)
+        local lb = api.gui.comp.Button.new(nameTv, true)
+        lb:setStyleClassList({"timetable-avtivateTimetableButton"})
+        lb:onClick(function() toggleLineSelection(li) end)
+        ld.nameView = nameTv
+        il:addItem(lb)
+
+        local dotCont = api.gui.comp.Component.new("dotCont")
+        dotCont:setMinimumSize(api.gui.util.Size.new(14, 14))
+        dotCont:setMaximumSize(api.gui.util.Size.new(14, 14))
+        local dotLayout = api.gui.layout.FloatingLayout.new(0, 1)
+        dotCont:setLayout(dotLayout)
+        local dotLrv = api.gui.comp.LineRenderView.new()
+        dotLrv:setMinimumSize(api.gui.util.Size.new(10, 10))
+        dotLrv:setMaximumSize(api.gui.util.Size.new(10, 10))
+        dotLrv:setColor(ld.color)
+        dotLrv:setWidth(2)
+        for y = 1, 9, 2 do
+            dotLrv:addLine(api.type.Vec2f.new(1, y), api.type.Vec2f.new(9, y))
+        end
+        dotLayout:addItem(dotLrv, 0.5, 0.5)
+        il:addItem(dotCont)
+        nl:addItem(ic)
+    end
+    debugPrint("lineList names: " .. table.concat(lineListDebug, ", "))
+    nc:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, lineCount * 44))
+    menu.lineScrollArea:setContent(nc)
+    menu.lineListLayout = nl; menu.lineListComponent = nc
+    -- 恢复刷新前的滚动位置，避免车次列表回到最上面（影响用户继续改动）
+    restoreScrollOffset(menu.lineScrollArea, prevOffset)
+end
+
+local function applyPresetToStations(preset)
+    if not preset or not preset.stationData then return end
+    for _, st in pairs(allStations) do
+        local key = stableKey(st.stopType, st.id, st.uniqueKey, st.entityId)
+        local d = preset.stationData[key]
+        if d then st.selected = d.selected or false; st.sort = (type(d.sort) == "number" and d.sort > 0 and d.sort <= 255) and d.sort or 256
+        else st.selected = false; st.sort = 1 end
+    end
+    -- 线路勾选先整体重置为勾选，再按 preset.lineData 覆盖：
+    -- 车站勾选是显式赋值（else st.selected = false），而线路之前只覆盖 lineData 里存在的线路，
+    -- 未被覆盖的线路会继承上一预设的勾选状态（残留为全勾选），导致"切换预设回来又全部勾选"。
+    -- 重置后再覆盖使线路状态与车站一样确定化。
+    for _, ld in pairs(allLines) do ld.checked = true end
+    if preset.lineData then
+        for _, ld in pairs(allLines) do
+            local chk = preset.lineData[tostring(ld.id)]
+            if chk ~= nil then ld.checked = chk end
+        end
+    end
+end
+
+saveCurrentPreset = function()
+    -- 只允许保存当前展开的预设；不落入 getActivePreset() 回退，
+    -- 避免在 allStations 为未加载默认状态时把空配置写回（数据丢失）。
+    local p = currentPresetRef
+    if not p then debugPrint("saveCurrentPreset: no current preset, skip"); return end
+    local sd = {}
+    local asCount = 0
+    local selCount = 0
+    for _, st in pairs(allStations) do
+        asCount = asCount + 1
+        local key = stableKey(st.stopType, st.id, st.uniqueKey, st.entityId)
+        sd[key] = {selected = st.selected or false, sort = (type(st.sort) == "number" and st.sort > 0 and st.sort <= 255) and st.sort or 256}
+        if st.selected then selCount = selCount + 1 end
+    end
+    debugPrint("saveCurrentPreset: allStations=" .. asCount .. " selected=" .. selCount .. " sd type=" .. type(sd))
+    p.stationData = sd
+
+    local ld = {}
+    local ldCount = 0
+    -- 线路勾选状态从 allLines 保存（而非 displayedLines）：
+    -- displayedLines 只是"当前选中车站相关的线路"子集，且首次打开/未绘制时为空，
+    -- 用它会误把已保存的 lineData 清空（即"勾选状态保存不上"）。
+    -- allLines 是完整线路集合，与 applyPresetToStations 的应用侧（同样遍历 allLines）一致。
+    for _, line in pairs(allLines) do
+        if line.id then
+            ldCount = ldCount + 1
+            ld[tostring(line.id)] = line.checked
+        end
+    end
+    p.lineData = ld
+    debugPrint("saveCurrentPreset: lineData entries=" .. ldCount)
+end
+
+local function saveAllLineColors()
+    for _, ld in pairs(allLines) do
+        if ld.color then saveLineColor(ld.id, ld.color) end
+    end
+end
+
+local function updateStationVisibility()
+    local filterActive = (#stationFilterText > 0)
+    for presetId, rows in pairs(stationRowGroups) do
+        local visible = (presetId == expandedPresetId)
+        for _, rd in pairs(rows) do
+            local show = visible
+            if visible and filterActive then
+                show = string.find(string.lower(rd.st.name), string.lower(stationFilterText), 1, true) ~= nil
+            end
+            pcall(function() rd.comp:setVisible(show, false) end)
+            if show then
+                pcall(function() rd.ck:setImage(rd.st.selected and "ui/checkbox1.tga" or "ui/checkbox0.tga", false) end)
+                pcall(function() rd.sp:setValue(rd.st.sort, false) end)
+            end
+        end
+    end
+end
+
+rebuildPresetList = function()
+    if not menu.presetScrollArea then return end
+    local prevOffset = nil
+    pcall(function()
+        local tmp = menu.presetScrollArea:getScrollOffset()
+        prevOffset = api.type.Vec2i.new(tmp.x, tmp.y)
+    end)
+    local nc = api.gui.comp.Component.new("presetList")
+    local nl = api.gui.layout.BoxLayout.new("VERTICAL")
+    nc:setLayout(nl)
+    stationRowGroups = {}
+    debugPrint("rebuildPresetList: " .. #localPresets .. " presets, expanded=" .. tostring(expandedPresetId) .. " allStations=" .. #allStations)
+
+    if #localPresets == 0 then
+        local lbl = api.gui.comp.TextView.new(D.no_presets)
+        lbl:setStyleClassList({"timetable-mono-sc"})
+        nl:addItem(lbl)
+        menu.presetScrollArea:setContent(nc)
+        restoreScrollOffset(menu.presetScrollArea, prevOffset)
+        return
+    end
+
+    for __, ps in ipairs(localPresets) do
+        local isExpanded = (expandedPresetId == ps.id)
+
+        local row = api.gui.comp.Component.new("pr_" .. ps.id)
+        local rl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+        row:setLayout(rl)
+        if ps.id == pendingScrollPresetId then pendingScrollPresetRow = row end
+
+        local tglIcon = api.gui.comp.TextView.new(isExpanded and "▽" or "▶")
+        local tgl = api.gui.comp.Button.new(tglIcon, true)
+        tgl:onClick(function()
+            if expandedPresetId == ps.id then
+                expandedPresetId = nil
+                currentPresetRef = nil
+                if menu.presetScrollArea then
+                    menu.presetScrollArea:invokeLater(function() pcall(function() rebuildPresetList() end) end)
+                end
+            else
+                expandedPresetId = ps.id
+                currentPresetRef = ps
+                setActivePresetId(ps.id)
+                applyPresetToStations(ps)
+                sortAllStations()
+                -- 展开预设即展开车次列表并立即绘制该预设的运行图。
+                -- 勾选车站少于1个时 refreshDiagram 内部会清除旧图而不绘制（新增配置先勾选再点刷新）。
+                displayedLines = getRelevantLines(getSelectedStationList())
+                updateLineList()
+                if menu.renderLayout and menu.stationLabels and menu.timeLabels then
+                    pcall(function() refreshDiagram() end)
+                end
+                if menu.presetScrollArea then
+                    menu.presetScrollArea:invokeLater(function() pcall(function() rebuildPresetList() end) end)
+                end
+            end
+            pcall(function() tglIcon:setText(expandedPresetId == ps.id and "▽" or "▶") end)
+        end)
+
+        local inp = nil
+        local okTI, tiField = pcall(function() return api.gui.comp.TextInputField.new("") end)
+        if okTI and tiField then
+            inp = tiField
+            tiField:setText(ps.name, false)
+            tiField:onChange(function(text)
+                if text and #text > 0 then
+                    ps.name = text
+                end
+            end)
+        end
+        if not inp then
+            local nameLabel = api.gui.comp.TextView.new(ps.name)
+            nameLabel:setStyleClassList({"timetable-mono-sc"})
+            rl:addItem(tgl); rl:addItem(nameLabel)
+        else
+            rl:addItem(tgl); rl:addItem(inp)
+        end
+        local delBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new("X"), true)
+        delBtn:onClick(function()
+            local targetId = ps.id
+            local targetName = ps.name
+            local cc2 = api.gui.comp.Component.new("confirmContent")
+            local cl2 = api.gui.layout.BoxLayout.new("VERTICAL")
+            cc2:setLayout(cl2)
+            cl2:addItem(api.gui.comp.TextView.new(string.format(D.confirm_delete, targetName)))
+            local blc2 = api.gui.comp.Component.new("confirmBtns")
+            local bll2 = api.gui.layout.BoxLayout.new("HORIZONTAL")
+            blc2:setLayout(bll2)
+            local okW, cw2 = pcall(function() return api.gui.comp.Window.new(D.warning, cc2) end)
+            if not okW or not cw2 then return end
+            cw2:addHideOnCloseHandler()
+            cw2:setMovable(true)
+            cw2:setSize(api.gui.util.Size.new(350, 120))
+            cw2:setPosition(400, 300)
+            local ok2 = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.confirm), true)
+            ok2:onClick(function()
+                pcall(function() cw2:setVisible(false, false) end)
+                for i, p in ipairs(localPresets) do if p.id == targetId then table.remove(localPresets, i); break end end
+                if expandedPresetId == targetId then
+                    expandedPresetId = nil
+                    currentPresetRef = nil
+                    -- 删除正在展开的预设：清空车次列表与运行图，避免残留已删除预设的图形
+                    displayedLines = {}
+                    updateLineList()
+                    clearDiagramViews()
+                end
+                if #localPresets == 0 then setActivePresetId(""); currentPresetRef = nil end
+                savePresetsToTimetableObject()
+                rebuildPresetList()
+            end)
+            local cancel2 = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.cancel), true)
+            cancel2:onClick(function() pcall(function() cw2:setVisible(false, false) end) end)
+            bll2:addItem(ok2); bll2:addItem(cancel2); cl2:addItem(blc2)
+        end)
+        rl:addItem(delBtn)
+        nl:addItem(row)
+
+        local rows = {}
+        if isExpanded then
+            for __, st in pairs(allStations) do
+                local sr = api.gui.comp.Component.new("sr_" .. st.uniqueKey)
+                local sl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+                sr:setLayout(sl)
+
+                local ck = api.gui.comp.ImageView.new(st.selected and "ui/checkbox1.tga" or "ui/checkbox0.tga")
+                local cb = api.gui.comp.Button.new(ck, true)
+                cb:onClick(function()
+                    st.selected = not st.selected
+                    ck:setImage(st.selected and "ui/checkbox1.tga" or "ui/checkbox0.tga", false)
+                    -- 勾选/取消勾选车站后立即保存当前铁路线配置，不再依赖保存按钮
+                    if currentPresetRef then
+                        local okSave, saveErr = pcall(function()
+                            saveCurrentPreset()
+                            savePresetsToTimetableObject()
+                        end)
+                        if not okSave then debugPrint("stationCheck SAVE ERROR: " .. tostring(saveErr)) end
+                    end
+                end)
+
+                local lb = api.gui.comp.TextView.new(st.name)
+                lb:setStyleClassList({"timetable-mono-sc"})
+
+                local sld = api.gui.comp.TextView.new(D.sort)
+                sld:setStyleClassList({"timetable-mono-sc"})
+
+                local sp = api.gui.comp.DoubleSpinBox.new()
+                sp:setMinimum(1, false)
+                sp:setMaximum(256, false)
+                local sv = (type(st.sort) == "number" and st.sort >= 1 and st.sort <= 256) and st.sort or 256
+                pcall(function() sp:setValue(sv, false) end)
+                sp:onChange(function(v)
+                    st.sort = math.floor(v + 0.5)
+                    -- 排序序号改动后立即保存（注意：onChange 逐位触发，这里只写数据不重建 UI，
+                    -- 否则会打断输入框焦点/值，见 AGENTS.md 时刻表 SpinBox 丢值经验）
+                    if currentPresetRef then
+                        local okSave, saveErr = pcall(function()
+                            saveCurrentPreset()
+                            savePresetsToTimetableObject()
+                        end)
+                        if not okSave then debugPrint("sortChange SAVE ERROR: " .. tostring(saveErr)) end
+                    end
+                end)
+
+                sl:addItem(cb); sl:addItem(lb); sl:addItem(sld); sl:addItem(sp)
+                nl:addItem(sr)
+                table.insert(rows, {comp = sr, ck = ck, sp = sp, st = st})
+            end
+        end
+        stationRowGroups[ps.id] = rows
+    end
+
+    menu.presetScrollArea:setContent(nc)
+    -- 恢复刷新/重建前的滚动位置，避免铁路线列表回到最上面
+    restoreScrollOffset(menu.presetScrollArea, prevOffset)
+end
+
+local function addNewPreset()
+    local id = tostring(#localPresets + 1)
+    local ps = {id = id, name = D.preset .. (#localPresets + 1), stationData = {}, lineData = nil}
+    table.insert(localPresets, ps)
+    setActivePresetId(id)
+    currentPresetRef = ps
+    expandedPresetId = id
+    applyPresetToStations(ps)
+    -- 新预设默认全部线路勾选：显式重置 allLines.checked（否则会继承上一预设经 allLines
+    -- 传递的勾选状态，导致"只默认勾选第一个"）。
+    for _, ld in pairs(allLines) do ld.checked = true end
+    -- 新预设无勾选车站：清空车次列表与运行图（不绘制），等待玩家勾选车站后点刷新绘制
+    displayedLines = {}
+    updateLineList()
+    clearDiagramViews()
+    pendingScrollPresetId = id
+    pendingScrollPresetRow = nil
+    rebuildPresetList()
+    pendingScrollPresetId = nil
+    -- 滚动预设列表，让新增加的预设表头露出：用 ensureVisible 做最小滚动，
+    -- 保留上方已有配置（如配置11）仍在视口内，同时能看到新增的配置12。
+    -- 不能滚到顶部也不能滚到底部（新预设已展开，底部只有它的最后一个车站行）。
+    local psa = menu.presetScrollArea
+    local targetRow = pendingScrollPresetRow
+    if psa and targetRow then
+        psa:invokeLater(function()
+            psa:invokeLater(function()
+                pcall(function() psa:ensureVisible(targetRow) end)
+            end)
+        end)
+    end
+end
+
+local function persistConfig()
+    if currentPresetRef then saveCurrentPreset() end
+    savePresetsToTimetableObject()
+    saveAllLineColors()
+    local pc = #localPresets
+    local ac = 0
+    if currentPresetRef and currentPresetRef.stationData then
+        for _ in pairs(currentPresetRef.stationData) do ac = ac + 1 end
+    end
+    debugPrint("persistConfig: " .. pc .. " presets, current has " .. ac .. " station data entries")
+end
+
+local function doRefreshData()
+    stationFilterText = ""
+    -- 记录刷新前线路勾选状态：getAllTimetableData 会重建 allLines（默认全勾选），
+    -- 刷新后恢复，保证"刚才勾选/取消勾选的线路"在刷新后不消失。
+    local prevChecks = {}
+    for _, ld in pairs(allLines) do
+        if ld.id then prevChecks[tostring(ld.id)] = ld.checked end
+    end
+    local to = timetable.getTimetableObject()
+    local host = getHostLineKey(to)
+    if host and to[host].dp and to[host].dp.colorList then
+        local cfg = getConfig()
+        if not cfg.lineColors then cfg.lineColors = {} end
+        for _, entry in pairs(to[host].dp.colorList) do
+            cfg.lineColors[entry.i] = {entry.r, entry.g, entry.b, entry.a}
+        end
+    end
+    local lineDataList = getAllTimetableData()
+    allStations = getAllStationsFlat(lineDataList)
+    allLines = lineDataList
+    displayedLines = {}
+    for _, ld in pairs(lineDataList) do
+        local sc = getLineColor(ld.id)
+        if sc then ld.color = sc end
+    end
+    if currentPresetRef then applyPresetToStations(currentPresetRef) end
+    -- 恢复刷新前内存中的勾选状态（与即时保存一致；未展开预设时的改动刷新后也能保留）
+    for _, ld in pairs(allLines) do
+        local pc = prevChecks[tostring(ld.id)]
+        if pc ~= nil then ld.checked = pc end
+    end
+    sortAllStations()
+    -- 刷新车次列表 + 重绘运行图；勾选车站少于1个时 refreshDiagram 内部会清除旧图
+    displayedLines = getRelevantLines(getSelectedStationList())
+    updateLineList()
+    if menu.renderLayout and menu.stationLabels and menu.timeLabels then
+        pcall(function() refreshDiagram() end)
+    end
+    rebuildPresetList()
+end
+
+function diagramGUI.showDiagram()
+    if menu.window ~= nil then
+        local ok = pcall(function()
+            stationFilterText = ""
+            local to = timetable.getTimetableObject()
+            local host = getHostLineKey(to)
+            if host and to[host].dp and to[host].dp.colorList then
+                local cfg = getConfig()
+                if not cfg.lineColors then cfg.lineColors = {} end
+                for _, entry in pairs(to[host].dp.colorList) do
+                    cfg.lineColors[entry.i] = {entry.r, entry.g, entry.b, entry.a}
+                end
+            end
+            local lineDataList = getAllTimetableData()
+            allStations = getAllStationsFlat(lineDataList)
+            allLines = lineDataList
+            for _, ld in pairs(lineDataList) do
+                local sc = getLineColor(ld.id)
+                if sc then ld.color = sc end
+            end
+            if currentPresetRef then applyPresetToStations(currentPresetRef) end
+            sortAllStations()
+            local sel = getSelectedStationList()
+            if #sel > 0 then
+                displayedLines = getRelevantLines(sel)
+                updateLineList()
+            end
+            rebuildPresetList()
+            menu.window:setVisible(true, true)
+        end)
+        if ok then return end
+        menu.window = nil
+        menu.lineRenderViews = {}
+        menu.stationLabels = {}
+        menu.stationLabelViews = {}
+        menu.timeLabelViews = {}
+        menu.timeLabels = {}
+    end
+
+    stationFilterText = ""
+    loadPresetsFromTimetableObject()
+
+    local lineDataList = getAllTimetableData()
+    allStations = getAllStationsFlat(lineDataList)
+    allLines = lineDataList
+    displayedLines = {}
+
+    debugPrint("Window open: " .. #localPresets .. " presets, activeId='" .. getActivePresetId() .. "'")
+    for _, lp in pairs(localPresets) do
+        local sc = 0
+        if lp.stationData then for _ in pairs(lp.stationData) do sc = sc + 1 end end
+        debugPrint("  preset " .. lp.id .. "='" .. lp.name .. "' stationData=" .. sc)
+    end
+
+    expandedPresetId = nil
+    currentPresetRef = nil
+
+    for _, ld in pairs(lineDataList) do
+        local sc = getLineColor(ld.id)
+        if sc then ld.color = sc end
+    end
+
+    local mainLayout = api.gui.layout.BoxLayout.new("HORIZONTAL")
+
+    local leftPanel = api.gui.comp.Component.new("leftPanel")
+    local leftLayout = api.gui.layout.BoxLayout.new("VERTICAL")
+    leftPanel:setLayout(leftLayout)
+    leftPanel:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H))
+    leftPanel:setMaximumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H))
+
+    local phc = api.gui.comp.Component.new("presetHeader")
+    local phl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+    phc:setLayout(phl)
+    phl:addItem(api.gui.comp.TextView.new(D.railway_lines))
+    local addBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new("+"), true)
+    addBtn:onClick(function() addNewPreset() end)
+    phl:addItem(addBtn)
+
+    phl:addItem(api.gui.comp.TextView.new(D.search))
+
+    leftLayout:addItem(phc)
+
+    local psa = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new("presetScroll"), "diagram.presetScroll")
+    psa:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 270))
+    psa:setMaximumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 270))
+    menu.presetScrollArea = psa
+    leftLayout:addItem(psa)
+
+    local btnBar = api.gui.comp.Component.new("buttonBar")
+    local bbl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+    btnBar:setLayout(bbl)
+    -- 保存按钮已移除：车站勾选/排序序号/线路勾选均为即时保存；
+    -- 车次列表与运行图由"展开预设"或"刷新"按钮触发。
+    local refBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.refresh), true)
+    refBtn:onClick(function()
+        local ok, err = pcall(function() doRefreshData() end)
+        if not ok then debugPrint("Refresh error: " .. tostring(err)) end
+    end)
+    bbl:addItem(refBtn)
+    leftLayout:addItem(api.gui.comp.Component.new("HorizontalLine"))
+    leftLayout:addItem(btnBar)
+
+    local lsc = api.gui.comp.Component.new("lineSection")
+    local lsl = api.gui.layout.BoxLayout.new("VERTICAL")
+    lsc:setLayout(lsl)
+
+    local lhc = api.gui.comp.Component.new("lineHeader")
+    local lhl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+    lhc:setLayout(lhl)
+    lhl:addItem(api.gui.comp.TextView.new(D.train_list))
+
+    local lineColorBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.color), true)
+    lineColorBtn:setStyleClassList({"timetable-avtivateTimetableButton"})
+    lineColorBtn:onClick(function()
+        local boldLines = {}
+        for _, ld in pairs(displayedLines) do
+            if ld.bold then table.insert(boldLines, ld) end
+        end
+        if #boldLines == 0 then return end
+        local cp = api.gui.comp.ColorPicker.new()
+        cp:onColorChanged(function(c)
+            local newColor = api.type.Vec4f.new(c.x, c.y, c.z, 1.0)
+            for _, ld2 in pairs(boldLines) do
+                ld2.color = newColor
+                saveLineColor(ld2.id, newColor)
+                pcall(function()
+                    api.cmd.sendCommand(api.cmd.make.setColor(ld2.id, api.type.Vec3f.new(c.x, c.y, c.z)))
+                end)
+            end
+            local to = timetable.getTimetableObject()
+            local host = getHostLineKey(to)
+            if host and to[host].dp then
+                if not to[host].dp.colorList then to[host].dp.colorList = {} end
+                for _, ld2 in pairs(boldLines) do
+                    local found = false
+                    for _, entry in pairs(to[host].dp.colorList) do
+                        if entry.i == tostring(ld2.id) then
+                            entry.r = c.x; entry.g = c.y; entry.b = c.z; entry.a = 1.0
+                            found = true; break
+                        end
+                    end
+                    if not found then
+                        table.insert(to[host].dp.colorList, {i = tostring(ld2.id), r = c.x, g = c.y, b = c.z, a = 1.0})
+                    end
+                end
+            end
+            _G._diagramForceSync = true
+            pcall(function() refreshDiagram() end)
+            updateLineList()
+        end)
+        local okW, w = pcall(function() return api.gui.comp.Window.new(D.choose_color, cp) end)
+        if okW and w then w:addHideOnCloseHandler(); w:setMovable(true); w:setPosition(300, 200) end
+    end)
+    lhl:addItem(lineColorBtn)
+    lsl:addItem(lhc)
+
+    local lsa = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new("lineScroll"), "diagram.lineScroll")
+    menu.lineListComponent = api.gui.comp.Component.new("lineList")
+    menu.lineListLayout = api.gui.layout.BoxLayout.new("VERTICAL")
+    menu.lineListComponent:setLayout(menu.lineListLayout)
+    lsa:setContent(menu.lineListComponent)
+    lsa:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 270))
+    lsa:setMaximumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 270))
+    menu.lineScrollArea = lsa
+    lsl:addItem(lsa)
+    leftLayout:addItem(lsc)
+    mainLayout:addItem(leftPanel)
+
+    local da = api.gui.comp.Component.new("diagramArea")
+    local dl2 = api.gui.layout.BoxLayout.new("VERTICAL")
+    da:setLayout(dl2)
+    da:setMinimumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H))
+    da:setMaximumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H))
+
+    local ca = api.gui.comp.Component.new("chartArea")
+    local cl2 = api.gui.layout.BoxLayout.new("HORIZONTAL")
+    ca:setLayout(cl2)
+    ca:setMinimumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H - TIME_LABEL_HEIGHT))
+    ca:setMaximumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H - TIME_LABEL_HEIGHT))
+    local slc = api.gui.comp.Component.new("stationLabels")
+    local sll = api.gui.layout.AbsoluteLayout.new()
+    slc:setLayout(sll)
+    slc:setMinimumSize(api.gui.util.Size.new(STATION_LABEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H - TIME_LABEL_HEIGHT))
+    slc:setMaximumSize(api.gui.util.Size.new(STATION_LABEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H - TIME_LABEL_HEIGHT))
+    menu.stationLabels = {layout = sll, component = slc, parentLayout = cl2}
+    cl2:addItem(slc)
+
+    local ra = api.gui.comp.Component.new("renderArea")
+    menu.renderArea = ra
+    menu.renderLayout = api.gui.layout.FloatingLayout.new(0, 1)
+    ra:setLayout(menu.renderLayout)
+    local rw = WINDOW_WIDTH - STATION_PANEL_WIDTH - STATION_LABEL_WIDTH
+    local rh = WINDOW_HEIGHT - TITLE_BAR_H - TIME_LABEL_HEIGHT
+    ra:setMinimumSize(api.gui.util.Size.new(rw, rh))
+    ra:setMaximumSize(api.gui.util.Size.new(rw, rh))
+    menu.lineRenderViews = {}
+    local function mkiv()
+        local v = api.gui.comp.LineRenderView.new()
+        v:setMinimumSize(api.gui.util.Size.new(rw, rh))
+        v:setMaximumSize(api.gui.util.Size.new(rw, rh))
+        menu.renderLayout:addItem(v, 0.5, 0)
+        table.insert(menu.lineRenderViews, v)
+    end
+    mkiv(); mkiv()
+    cl2:addItem(ra); dl2:addItem(ca)
+
+    local tlc = api.gui.comp.Component.new("timeLabels")
+    local tll = api.gui.layout.AbsoluteLayout.new()
+    tlc:setLayout(tll)
+    tlc:setMinimumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, TIME_LABEL_HEIGHT))
+    tlc:setMaximumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, TIME_LABEL_HEIGHT))
+    menu.timeLabels = {layout = tll, component = tlc, parentLayout = dl2}
+    dl2:addItem(tlc); mainLayout:addItem(da)
+
+    local wrapper = api.gui.comp.Component.new("diagramWrapper")
+    wrapper:setLayout(mainLayout)
+    rebuildPresetList()
+
+    local ttWasVisible = _G._timetableVisible
+    local okW2, newWin = pcall(function() return api.gui.comp.Window.new(D.title, wrapper) end)
+    if not okW2 or not newWin then debugPrint("Window.new failed"); return end
+    menu.window = newWin
+    menu.window:invokeLater(function()
+        pcall(function()
+            if _G._timetableWindow and ttWasVisible then
+                _G._timetableWindow:setVisible(true, false)
+            end
+        end)
+    end)
+    menu.window:addHideOnCloseHandler()
+    menu.window:setMovable(true); menu.window:setResizable(true)
+    menu.window:setSize(api.gui.util.Size.new(WINDOW_WIDTH, WINDOW_HEIGHT))
+    menu.window:setPosition(200, 100)
+    menu.window:invokeLater(function()
+        local okSF, ff = pcall(function()
+            local f = api.gui.comp.TextInputField.new("")
+            f:setText(stationFilterText, false)
+            f:onChange(function(text)
+                stationFilterText = text or ""
+                updateStationVisibility()
+            end)
+            return f
+        end)
+        if okSF and ff then
+            phl:addItem(ff)
+            debugPrint("filterField OK (deferred)")
+        else
+            debugPrint("filterField FAIL deferred: " .. tostring(ff))
+        end
+    end)
+    menu.window:onClose(function()
+        persistConfig()
+        menu.window = nil; menu.lineRenderViews = {}; menu.stationLabels = {}
+        menu.stationLabelViews = {}; menu.timeLabelViews = {}
+        menu.timeLabels = {}; menu.lineListLayout = nil; menu.lineListComponent = nil
+        menu.renderLayout = nil; menu.renderArea = nil
+        menu.lineScrollArea = nil; menu.presetScrollArea = nil
+        stationRowGroups = {}; displayedLines = {}
+    end)
+end
+
+return diagramGUI
