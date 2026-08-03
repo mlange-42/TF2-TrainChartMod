@@ -8,7 +8,7 @@ Timetables can be configured for each line and each station individually. There 
 [*] [b] Unbunch[/b]: You can set the frequency and the mod will enforce that the trains will depart this station with the given frequency.
 [*] [b] Waypoint passing times[/b]: Set passing times for intermediate waypoints and rename them per line.
 [/list]
-Trains will depart right away when they are late without interference from the mod. The timetable mod uses the in-game stop command and can therefore only enforce longer waiting times. It won't make trains drive faster or load/unload quicker.
+Trains will depart right away when they are late, unless they exceed the configurable delay tolerance (Timetable window > Settings): choose "None" to always let late trains depart, or pick 5/10/20/30 minutes - trains delayed beyond the limit are held until the next slot. The timetable mod uses the in-game stop command and can therefore only enforce longer waiting times. It won't make trains drive faster or load/unload quicker.
 
 Timetables are only working when the checkbox on the line overview is ticked.
 
@@ -46,7 +46,7 @@ Die Fahrpläne können individuell für jede Linie und Station angepasst werden.
 [*] [b] Unbunch[/b]: Es kann eine Frequenz gesetzt werden. Der Zug fährt in der gesetzten Frequenz am Bahnhof ab.
 [*] [b] Wegpunkt-Durchfahrtszeiten[/b]: Lege Durchfahrtszeiten für Zwischenwegpunkte fest und benenne sie pro Linie um.
 [/list]
-Bei Verspätung fahren die Züge nach dem Ein- und Ausladen direkt weiter. Der Mod verwendet das Stop-Kommando aus dem Spiel und kann deshalb nur Züge länger warten lassen, jedoch keine Züge schneller fahren lassen oder die Ladezeiten beschleunigen!
+Bei Verspätung fahren die Züge nach dem Ein- und Ausladen direkt weiter, sofern sie die einstellbare Verspätungstoleranz nicht überschreiten (Fahrplan-Fenster > Einstellungen): Wähle "Keine", um verspätete Züge immer fahren zu lassen, oder 5/10/20/30 Minuten - Züge, die länger als das Limit verspätet sind, werden bis zum nächsten Slot zurückgehalten. Der Mod verwendet das Stop-Kommando aus dem Spiel und kann deshalb nur Züge länger warten lassen, jedoch keine Züge schneller fahren lassen oder die Ladezeiten beschleunigen!
 
 Damit die Fahrpläne funktionieren, muss die kleine Checkbox auf der Linienübersicht aktiviert sein!
 
@@ -84,7 +84,7 @@ Fahrplan-Logik, UI und Game-API-Schicht stammen vom Originalmod von [url=https:/
 [*] [b] Интервал[/b]: Вы можете установить временной отрезок, и составы будут двигаться с указанным интервалом.
 [*] [b] Время прохождения путевых точек[/b]: Задавайте время прохождения промежуточных путевых точек и переименовывайте их для каждой линии.
 [/list]
-Если поезда отстают от расписания, они будут отправляться сразу после загрузки. Поскольку мод построен на игровой механике остановок, он влияет только на неё. Он не может заставить поезда двигаться быстрее или медленнее или ускорять загрузку пассажиров.
+Если поезда отстают от расписания, они будут отправляться сразу после загрузки, если не превышают настраиваемый допуск опоздания (Окно расписаний > Настройки): выберите "Нет", чтобы опаздывающие поезда всегда отправлялись, или 5/10/20/30 минут - поезда, опаздывающие дольше лимита, задерживаются до следующего слота. Поскольку мод построен на игровой механике остановок, он влияет только на неё. Он не может заставить поезда двигаться быстрее или медленнее или ускорять загрузку пассажиров.
 
 Расписания работают только тогда, когда установлена галочка в меню действующих линий.
 
@@ -122,7 +122,7 @@ Fahrplan-Logik, UI und Game-API-Schicht stammen vom Originalmod von [url=https:/
 [*] [b]防聚集[/b]：设置发车频率，模组将强制列车按该频率从车站发车。
 [*] [b]路径点通过时间[/b]：为中间路径点设置通过时间，并可按线路重命名。
 [/list]
-列车晚点时将在装卸完毕立即发车，模组不会干扰。时刻表基于游戏自带的停靠指令，因此只能强制更长的等待时间，无法让列车加速或加快装卸。
+列车晚点时将在装卸完毕立即发车，除非超过可配置的晚点判定标准（时刻表窗口 > 设置）：选择"无"则晚点列车始终立即发车，或选 5/10/20/30 分钟——超过该标准的列车将被扣到下一个时间槽。时刻表基于游戏自带的停靠指令，因此只能强制更长的等待时间，无法让列车加速或加快装卸。
 
 时刻表仅在"线路总览"界面勾选启用时生效。
 

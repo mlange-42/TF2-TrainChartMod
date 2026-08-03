@@ -80,5 +80,26 @@ function data()
     padding = {3,3,3,3}
   })
 
+  -- 准点信息圆点：正点白 / 早点绿 / 晚点红（实心小圆，用字符渲染，无需贴图）
+  -- 带 ! 前缀：供 setStyleClassList 引用
+  a("!timetable-punct-ontime", {
+    color = {1, 1, 1, 1},
+    fontSize = 10,
+  })
+  a("!timetable-punct-early", {
+    color = {0, 1, 0, 1},
+    fontSize = 10,
+  })
+  a("!timetable-punct-late", {
+    color = {1, 0, 0, 1},
+    fontSize = 10,
+  })
+
+  -- 运行图设置弹窗的分区标题（"刷新频率" / "时间标签位置"）
+  a("!timetable-settings-header", {
+    fontSize = 12,
+    color = {0.8, 0.8, 1, 1},
+  })
+
   return result
 end

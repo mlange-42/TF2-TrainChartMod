@@ -1,6 +1,222 @@
 # 开发进度 — 运行图预设系统
 
+## 观察点·暂不改（2026-08-02 记录，供以后考虑）
+- **死代码**：`res/config/game_script/diagram_gui.lua`（11KB，早期实验简化版，用归一化坐标画线）没有任何 require 引用——真正的运行图实现在 `res/scripts/celmi/timetables/diagram_gui.lua`（87KB，由 game_script/timetable_gui.lua:3 require）。该文件会随 mod 打包进工坊，属冗余，确认无用后建议删除
+- **备份文件会打包**：`res/scripts/celmi/timetables/` 下的 `diagram_gui.lua.bak_layout` / `diagram_gui.lua.bak_normalized`（68KB×2）也在 mod 目录内，会随 mod 打包进工坊，建议移出或清理（改回退策略：备份放项目外）
+- **类型可疑**：`getAllStops` 的 `sgEntity==0` 分支（timetable_helper.lua:724）用 `api.engine.getComponent(tostring(k), NAME)`——把字符串 `tostring(k)` 当实体 ID 传 getComponent。只在取兜底名时用且被 pcall 包着，暂未造成问题，但类型上不对，以后应改为真路径点实体
+- **缓存不刷新**：`stationEdgesCache`（timetable_helper.lua:440）是模块级 local，一次性缓存 `getStation2edgesMap()` 结果，玩家中途新建铁路/改车站后**不重载模块不会更新** → 新站可能被误判为"非铁路站"而过滤。若要做增量/按站失效/定期刷新需评估性能
+- **准点数据传播模式**：引擎线程 `update` 与 GUI 线程 `guiUpdate` 的 `_G` 不共享（AGENTS.md 已记录），目前 `_punctuality` 靠"GUI 线程内直接写 `_G`"规避——意味着任何要显示在运行图上的实时数据（准点、车辆位置等）都只能由 GUI 线程生成；将来若要引擎线程提供数据到运行图，必须走 `sendScriptEvent`/`timetableObject` 通道
+
+## 已修复（2026-08-03 本轮）
+
+### 到站停车机制不稳定（"有时等到发车时刻、有时停一下立马就发车"）
+- **现象**：用户反馈列车到站后行为不稳定——有时正常等到时刻表发车时刻才发车，有时刚停稳就立即发车，不等时刻表。时刻表"不严谨"
+- **根因1（主因，waitingRequired 门控放行已扣车）**：`waitingRequired` 第一行 `if getTimeUntilDeparture(vehicle) >= 5 then return false end` 在**任何情况下**都先返回"不等待"。`getTimeUntilDeparture` 返回的是引擎字段 `timeUntilCloseDoors`（关门倒计时，秒）。列车被 `setVehicleManualDeparture(true)` 扣车后，引擎往往保持/重置关门计时为较大值（乘客继续上下车、计时重新开始）→ 下一帧门控命中 `>=5` → `return false` → 协程调 `startVehicle`（`setVehicleManualDeparture(false)`）→ **释放扣车 → 列车立即发车**。这就是"停一下车立马就发车"的确定性来源（同一配置下时好时坏取决于引擎关门计时是否重置）
+- **根因2（多车同站误放行，outboundTime 共享）**："发车后 40s 内不干预"的 `stopData.outboundTime` 是**整站共享一个时间戳**。同一条线上某辆车被放行（晚点/容差内）后，40s 内同站**其它应该等待发车时刻的车**也命中该守卫被一起放行 → 立即发车
+- **修复**（`timetable.lua:waitingRequired`）：
+  1. `currentlyWaiting` 结构初始化提前到门控之前，门控改为**仅对"未被扣车"的车辆生效**：`if stopData.currentlyWaiting[vehicle] == nil and getTimeUntilDeparture(vehicle) >= 5 then return false end`——已被扣车的车只由 ArrDep 判定决定放行（发车时刻到/超容差才放），引擎重置关门计时不再误放
+  2. `stopData.outboundTime` 改为**按车辆分别记录**（`outboundTime[vehicle] = time`），同站被放行的车不再影响其它等待中的车
+- **验证**：lupa 模拟 9 个场景全过——早到车扣车、**扣车后关门计时重置为>=5 仍保持扣车**、到发车时刻放行+forceDeparture、晚点(tol 0)立即放行、**同站先放行的车不影响后到应等待的车**（多槽位+容差 30s 场景）等；既有 `tests/*` 全通过；三个改动文件 `lua.compile` 语法通过
+- **涉及**：`timetable.lua`
+- **遗留提示**：默认晚点判定标准=无（0），晚点车一律立即放行是"恢复旧行为"的既定设计；若玩家仍觉得"停一下车就走"，可把设置 Tab 的晚点判定标准调大（如 5/10 分钟）让晚点车继续等下一槽位
+
+### 准点信息不准确（晚点 5 分钟仍显示"正点"）
+- **现象**：有车实际晚点 5 分钟，准点信息却显示"正点"
+- **根因**：`diagram_gui.lua` 准点显示在**发车后（arrDone）只认发车判定且只显示"晚点"**——`if pv.depPunct == "late" then diff = pv.depDiff end`，发车早点也被当成"正点"；且发车检测依赖 `st.arrTime`，到站事件漏拍（短停站/加载时已停稳）时发车事件也一起漏记 → 显示旧站判定/"正点"
+- **修复（中国铁路逻辑，两段式判定，用户明确要求）**：
+  1. **显示**（`diagram_gui.lua` 准点显示段）：**发车前按"停车到站"事件判定到达**（早到/正点/晚点都显示，直到发车）；**发车后按"发车"事件修正为准**——晚发→晚点、正点发→正点、早发→早点。**晚点到站但正点发车 = 追回晚点 → 发车后显示"正点"**（不是晚点）；早发则显示"早点"，运行中即可看出上一站发车不正常
+  2. **发车事件捕获加固**（`timetable_gui.lua:updatePunctuality`）：发车检测不再依赖 `st.arrTime`（`if not st.arrDone then`），到站漏拍时发车判定也能给出；`arrDiff/arrPunct` 仅在到站已记录时计算
+- **涉及**：`diagram_gui.lua`、`timetable_gui.lua`
+
+### 右侧时间输入框"重影"（概率性叠字/重叠）
+- **现象**：点开某一线路后，右侧约束窗口的所有时间输入框（DoubleSpinBox）概率性出现"重影"（旧值叠在新值上/整窗重叠）
+- **根因（推测，引擎组件释放不可靠）**：右侧约束窗口重建路径是 `comboBox:setSelected(..., true)` 触发 `onIndexChanged` → `initStationTable + fillStationTable + clearConstraintWindow + makeArrDepWindow`。`clearConstraintWindow` 用 `deleteRows(1, getNumRows())`，与 AGENTS.md 已记录的 `AbsoluteLayout:deleteAll()` 同理——引擎对表格 `deleteRows/deleteAll` 可能**未完全释放嵌套的 DoubleSpinBox 组件**，旧输入框残留与新输入框叠在一起 → "重影"；且每次站切换都 `initConstraintTable`（removeItem 旧 scrollArea），若 removeItem 静默失败，两个约束表重叠 → "所有输入框重影"。两者都符合"概率性"
+- **修复**（`timetable_gui.lua`）：
+  1. 新增 `rebuildConstraintWindow(lineID)`：约束窗口任何重建都走 **`initConstraintTable`（新建 Table）+ `fillConstraintTable`**——旧组件靠"整表重建"清除，不依赖 deleteRows 可靠释放
+  2. `fillConstraintTable` 车站分支：`comboBox:setSelected(constraintIndex, true)` 改 `false` + **直接按类型构建**（`makeArrDepWindow`/`makeDebounceWindow`），不再依赖信号回调去构建（避免信号重入 + 中间表重复重建）
+  3. 车站 combobox `onIndexChanged`：改成整表重建 `initConstraintTable + fillConstraintTable`（新鲜表，无残留）
+  4. 全部 5 处 `clearConstraintWindowLaterHACK`（添加/删除到发槽、路径点改名失焦、添加/删除通过时间）改为 `initStationTable + fillStationTable + rebuildConstraintWindow(lineID)`
+  5. 路径点分支保留原行为（`setSelected(selectedIdx,false)` 已是直接构建；"None/Passing" 切换仍走 clearConstraintWindow/makePassingWindow，因 Passing 的选择态由"是否有通过时间"派生，整表重建会丢失临时"None"选择）
+- **涉及**：`timetable_gui.lua`
+
+### 时刻表界面"刷新"按钮（一键保存所有时间/路径点名/通过时间并整表重建）
+- **需求（最终方案）**：中间站表摘要不刷新问题，用户要求**不用等**——在右侧约束窗口 combobox（到发时刻/间隔控制）旁加"刷新"按钮，点一下就把所有时间数据、路径点名称、通过时间**保存并刷新整个时刻表界面**；路径点改名不再单独留保存按钮，整合进刷新按钮
+- **背景（试错）**：先是"1s 无改动延迟刷新"（`scheduleStationSummaryRefresh` 用游戏时间 `getTime()+1`）——**游戏暂停时 getTime 冻结，刷新不触发**，用户实测"还是不会变"。改手动刷新按钮最可靠（不依赖时间推进）
+- **修复**（`timetable_gui.lua`）：
+  1. `timetableGUI.refreshTimetableUI(lineID)`：`timetableChanged = true` + HACK（`initStationTable + fillStationTable + rebuildConstraintWindow`）——**中间站表 + 右侧约束窗口整表重建**，数据 onChange 已逐位写入，重建即显示最新值 + 触发跨线程同步
+  2. `fillConstraintTable` 车站/路径点两分支的 combobox 行从 2 列改 3 列：`{infoImage, comboBox, 刷新按钮}`，按钮 onClick → `refreshTimetableUI(lineID)`
+  3. **移除路径点改名保存按钮**（nameTable 还原 2 列），改名靠 onChange 双写 + 顶部刷新按钮统一提交重建；`commitName`/`refreshWaypointUI` 保留给 onChange/onFocusLost
+  4. 保留 `scheduleStationSummaryRefresh` 作为附加便利（游戏运行时自动刷新中间表，暂停时靠手动按钮）
+- **i18n**：复用已有 `diagram_refresh_i18n`（7 语言均已含）；移除本轮先前新增的 `diagram_wp_save_i18n`（7 语言，已无引用）
+- **涉及**：`timetable_gui.lua`、`strings.lua`
+
+### 时刻表时间输入后中间站表不刷新（输入完点别处，右侧有值、中间摘要不更新）
+- **现象**：在右侧约束窗口的到发/防聚集/通过时间输入框改完值后，点别处——右侧输入框已保存新值，但**中间站表那行的条件摘要**（如 `Arr: 46:00|Dep: 25:00|`）不刷新，必须重新打开时刻表窗口才更新
+- **根因**：`DoubleSpinBox:onChange` 只写数据 + `timetableChanged`，**不重建 UI**（AGENTS.md "13:30 变 00:30" 教训：onChange 逐位触发，重建会打断输入焦点）。中间站表摘要只在"重建路径"（选站/+/X/重开窗口）时才重算
+- **解决（用户选定手动刷新按钮，见上一条"时刻表界面刷新按钮"）**：
+  1. 新增 `stationSummaryRefreshDue`（游戏时间秒）+ `timetableGUI.scheduleStationSummaryRefresh()`：每次 onChange 把 `stationSummaryRefreshDue = getTime() + 1`——逐位输入时不断重置，输入停顿约 1s 后才真正刷新（**游戏运行时的附加便利**）
+  2. `guiUpdate` 每帧检查：`getTime() >= stationSummaryRefreshDue` 时调 `fillStationTable(UIState.currentlySelectedLineTableIndex, false)` **只重建中间站表**，条件摘要显示新到发时间
+  3. 8 处 SpinBox onChange（到发 4 + 防聚集 2 + 通过时间 2）全部加 `timetableGUI.scheduleStationSummaryRefresh()`
+  4. 关键：**只刷中间表、不重建右侧约束窗口**（不调 initStationTable/rebuildConstraintWindow），右侧 SpinBox 焦点/值完全不受影响，杜绝旧"13:30 变 00:30"复发
+  5. `onClose` 重置 `stationSummaryRefreshDue = nil`
+- **局限（已由刷新按钮兜底）**：DoubleSpinBox 无失焦回调（API 仅 TextInputField:OnFocusChange），用"1s 无改动"近似"光标已离开输入框"；**游戏暂停（getTime 冻结）时此自动刷新不触发**，此时点右侧"刷新"按钮手动整表重建
+- **涉及**：`timetable_gui.lua`
+
+## 已修复（2026-08-02 本轮#3）
+
+### 运行图左栏布局重构（设置/铁路线/车站搜索拆行）
+- **需求**：英文版运行图弹窗里 "Search" 单词太长，左侧栏预留位置太小，把搜索输入框顶到后面被遮挡
+- **改动（diagram_gui.lua `showDiagram` 左面板）**：
+  1. 设置按钮行保持最顶（紧贴窗口标题）
+  2. "铁路线" 标题 + "+" 按钮独立一行（原来与"搜索"共用一行）
+  3. "车站搜索"（新文案 `diagram_station_search_i18n`）标题 + 输入框独立一行，输入框经 `invokeLater` 加入该行布局 `shl`
+- **i18n**：新增 `diagram_station_search_i18n`（7 语言）；移除不再使用的 `D.search`
+- **涉及**：`diagram_gui.lua`、`strings.lua`
+
+### 路径点恢复（getAllStops 去掉 NAME 组件校验）
+- **现象**：时刻表/运行图里所有线路的路径点全部消失
+- **根因**：AGENTS.md 本轮#2"无路径点线路概率性多出路径点"修复用 `getComponent(wpRef, NAME)` 校验 + `break` 截断，假设"真正路径点都有 NAME 组件"。但**未命名路径点没有 NAME 组件**，第一个 waypoint 校验失败就 `break` → 全部路径点消失
+- **修复**：去掉 NAME 组件校验，只保留 `v.waypoints[i]` 取到 nil/抛错即截断（这才是防虚高 `#` 的正确手段）；路径点名用 pcall 单独读，读不到用 `UIStrings.waypoint .. flatIdx` 兜底，不阻断循环
+- **涉及**：`timetable_helper.lua:getAllStops`
+
+### 运行图设置弹窗重构（刷新频率 + 时间标签位置）
+- **需求**：设置弹窗分两个一级标题——"刷新频率"（10秒自动刷新/手动刷新互斥）+ "时间标签位置"（上/下，默认下）；点"确定"才应用并刷新
+- **改动（diagram_gui.lua 设置按钮弹窗）**：
+  1. 两个分区标题用新样式类 `timetable-settings-header`
+  2. 刷新频率 / 时间标签位置 都用**待应用值**（`selAuto`/`selPos`），点确定才写入 `_G._diagramAutoRefresh` + `timetable.setTimeLabelPos()` + `applyTimeLabelPosition()` + `doRefreshData()`（取消不生效）
+  3. 弹窗加高（窗口 320×280，内容组件固定 300×240）防止"确定/取消"按钮被顶掉
+- **i18n**：新增 `diagram_settings_refresh_rate/time_label/top/bottom_i18n`（7 语言）
+- **涉及**：`diagram_gui.lua`、`strings.lua`、`timetable_stylesheet.lua`
+
+### 时间标签位置切换（上/下）——三大布局方案试错
+- **需求**：玩家把运行图窗口下拉露出上半部分时，时间标签在底部看不清；希望切到"上"把时间标签挪到顶部、运行图和车站标签下移腾位，点确定刷新重绘
+- **持久化**：`timetable.getTimeLabelPos()/setTimeLabelPos()`，存 `timetableObject._diagramTimeLabelPos` + `_G`（与晚点容差同模式，随存档保留）
+- **试错记录（关键）**：
+  1. **BoxLayout removeItem+addItem 动态重排 → 不生效**：`da`（diagramArea）用 BoxLayout VERTICAL 承载 ca/tlc，切"上"后 `dl2:removeItem`+`addItem` 重排静默失败（日志 `tlc y=1060` 应用 top 后仍在底部）
+  2. **AbsoluteLayout Rect 定位 → 坐标错乱**：`da` 改 AbsoluteLayout，`addItem(ca, Rect.new(0,0,...))` 后 renderArea 跑到 `y=-311`（渲染坐标与 AbsoluteLayout 逻辑坐标不一致），整个图表错位
+  3. **FloatingLayout setAlignment → 索引取不到**：`da` 改 FloatingLayout（与 renderLayout 同款），`addItem(ca, 0.5, 0)`/`addItem(tlc, 0.5, 1)` 初始布局正常，但切换时 `setAlignment(index, x, y)` 的索引无法取得——`layout:getItem(i):getComponent()` 不存在（ILayoutItem 只有 `getId()`），`findLayoutIndex` 返回 nil，setAlignment 从未执行
+- **最终方案（可行）**：FloatingLayout + **removeItem + 重新 addItem(comp, alignX, alignY)** 切换：
+  - bottom：`addItem(ca, 0.5, 0)` 顶部 + `addItem(tlc, 0.5, 1)` 底部
+  - top：`addItem(tlc, 0.5, 0)` 顶部 + `addItem(ca, 0.5, 1)` 底部
+  - addItem 带对齐值是 renderLayout 一直使用的形态（AGENTS.md 已验证），pcall 保护
+- **经验**：FloatingLayout 初始 addItem 对齐有效；动态切换用 removeItem+重新 addItem（不要用 setAlignment，索引不可靠）；BoxLayout 动态重排、AbsoluteLayout 坐标定位均不可靠
+- **涉及**：`diagram_gui.lua`（da 构建段 + applyTimeLabelPosition + 设置弹窗 + 窗口打开时应用已存位置 + onClose 清理 daLayout/chartArea/appliedTimeLabelPos）
+
+### 时间标签下边框消失（renderArea 底部收缩）
+- **现象**：时间标签切到"上"后，运行图下边框贴合弹窗底边，下边框消失（与"绘制区右缘超出"同款问题，AGENTS.md 已记录）
+- **修复**：`refreshDiagram` 的 `dw/dh` 收缩逻辑加**纵向版**——`visH = (winRect.y + winRect.h) - rr.y - 2` 把 `dh` 收缩进窗口；时间标签在"上"时再额外缩 16px（`bottomPad`）整体上移，保证下边框可见；在"下"时不缩保持贴合
+- **诊断日志**：`refreshDiagram rects: rr=(...) win=(...) visH=... -> dw=... dh=...` 输出渲染区/窗口实际像素，便于后续调整
+- **涉及**：`diagram_gui.lua:refreshDiagram`
+
+### 时间标签文字下移半字（TextView 显式尺寸 + gravity）
+- **需求**：时间标签在下方时，文字紧贴运行图底边框，看运行图/时间都不方便，希望下移约半字
+- **试错**：① 在标签容器加空 spacer 组件 → **整个时间标签消失**（BoxLayout 加组件把布局撑坏）；② 只改 `label:setGravity(0.5, 1)` → **无效回到原位**（TextView 无显式尺寸时按文字高度自适应，约 10px 高，gravity 无处施力）
+- **最终方案**：label 显式 `setMinimumSize/setMaximumSize(labelW, TIME_LABEL_HEIGHT)` 占满 22px，再配合 gravity——下方 `(0.5, 1)` 贴底（文字下移约半字），上方 `(0.5, 0.5)` 居中
+- **经验**：**TextView 必须显式设尺寸，setGravity 才有效**（否则按文字高度自适应，gravity 形同虚设）
+- **涉及**：`diagram_gui.lua:refreshDiagram` 时间标签段
+
+## 已修复（2026-08-02 本轮#2）
+
+### 车次列表勾选置顶 + 线路名自然排序
+- **需求**：勾选要展示的线路后点刷新，勾选的线路全部移到最上面；线路名按"位数+大小"自然排序（G1,G2,G10,G21,G111）；中文按拼音首字母排序（评估后放弃）
+- **改动（diagram_gui.lua `getRelevantLines`）**：替换原来"按线路 ID 排序"为三层排序：
+  1. **勾选置顶**（`a.checked ~= b.checked → return a.checked`）
+  2. **字母+数字前缀自然排序**：`lineSortKey` 提取 `^(%a+)(%d+)` → 按 (字母, 数值) 比较（G123/G34 → 34 在前；纯数字名也按数值）；有前缀的排在没有前缀的前面
+  3. **其余（含中文）按 UTF-8 码点稳定排序**；同名/同 key 按线路 ID 兜底
+- **中文拼音首字母排序不做**：需内置数千字拼音对照表，TPF2 无此库，嵌入不可靠（用户已同意"有难度就只上移"）
+- **涉及**：`diagram_gui.lua:getRelevantLines`（排序替换为 lineSortKey/compareLines）
+
+### 无路径点线路概率性多出路径点（getAllStops 路径点实体校验）
+- **现象/反馈**：玩家线路只有车站没有路径点，时刻表页面某车站却概率性重叠出现几个路径点行
+- **根因（推测）**：`getAllStops`（timetable_helper.lua）展平 `Line.Stop.waypoints` 时，`v.waypoints` 是 userdata，其 `#` 对空对象可能返回**虚高**（无路径点车站概率性多出路径点），或实体已被删除；旧代码 `for i=1,wpCount` 对越界/无效索引仍尝试创建路径点
+- **修复**：逐条验证后截断——`v.waypoints[i]` 为 nil/取不到 或 `getComponent(wpRef, NAME)` 取不到（真正路径点都有 NAME 组件）即 `break`，不再创建假路径点；修正汇总日志：`v.waypoints` 路径点现在计入 `waypoints=` 计数（原来只统计 stationGroup==0 的误分类路径点）
+- **待确认**：若修复后仍概率出现，需玩家提供 `getAllStops line=... rawStops=... stations=... waypoints=...` 日志，区分是 stationGroup 误读为 nil（`-> classified as WAYPOINT` 会打日志）还是渲染层（deleteAll 未清干净）问题
+- **涉及**：`timetable_helper.lua:getAllStops`
+
+### 多套时刻表正晚点判定错套（getPlannedArrDep 多套感知）
+- **需求/反馈**：玩家线路某站配了两套时刻表（如站2 第一套到发 26:30/27:30、第二套 51:00/52:30），列车实际 26:45 到站跑的是第一套，却被判成晚点约 24-25 分钟——明显是拿第二套（51:00）判的
+- **根因**：`updatePunctuality`（timetable_gui.lua）里的 `getPlannedTime` **硬编码取 `conds[1]`（第一套）**。列车实际跑第几套与存储顺序无关，多套线路必然错套；旧相位机制（`st.phase` 单值跨站复用）在多套下也无法对齐正确周期
+- **修复**：新增 `getPlannedArrDep(lineID, stationNumber, actualArrTime)`——遍历该站所有 ArrDep 套，取"**绝对到达时刻离实际到达最近**的那一套"（`k = floor((actual-arr+1800)/3600)` 取最近周期，与 waitingRequired 槽位分配逻辑一致），返回该套绝对计划到/发秒。进站时选定并存 `st.plArr/st.plDep`，发车判定复用同一套；进站漏判时用到达/发车时刻兜底重选
+- **验证**：模拟 9 例（26:45→第一套晚点15秒、50:00→第二套早点1分、正点/跨周期/多小时）全部正确；等价于单套时的旧相位逻辑。注意周期内格式为 分:秒，26:45 与 26:30 相差 15 秒（显示"晚点 00:15"）
+- **涉及**：`timetable_gui.lua`（getPlannedArrDep 替代 getPlannedTime、updatePunctuality 进站/发车两处判定、punctualityState 结构去 phase 增 plArr/plDep）
+
+### 车次列表准点信息布局（●正点一体化 + 实际宽度自适应 + 横向滚动）
+- **需求**：准点信息的实心圆（●）与文字距离太远（"●     正点"）；左栏窄希望压缩；线路名过长时准点信息被顶出，加横向滚动条可划过去看
+- **改动（diagram_gui.lua `updateLineList` + showDiagram）**：
+  1. **● 与文字合并为一个 TextView（`"●" .. text`，完全一体化"●正点"）**：同一字符串内部不可能有间距，颜色同用准点样式类（正点白/早点绿/晚点红），不再需要单独圆点 TextView
+  2. **不手动估宽，靠实际渲染宽度自适应**：`ptv`/`pvCont` 设 `min 0 / max 600` 高度 24/rowH，宽度交给布局按真实文本宽度计算——上一版自写 `estimateMonoWidth`（CJK≈10px/ASCII≈6px）估宽不准，导致长文本（德/俄"Verspätet/Опоздание 05:30"）被裁、且行没真正变宽滚动条不出现
+  3. **行宽可增长**：`lineItem` 从固定 `220×rowH` 改为 `min 220 / max 600`；准点文本长或线路名长都会让行变宽 → 内容 `nc` 变宽 → 横向滚动条出现（实测：线路名过长时滚动条已出现）
+  4. **横向滚动条**：`lineScrollArea` 上 best-effort 调 `setHorizontalScrollBarPolicy(ScrollBarAsNeeded)`（`ScrollBarPolicy` 枚举路径未在官方 API 文档列出，pcall 保护，取不到就跳过）
+- **实测反馈（玩家）**：横向滚动条在线路名过长时已生效；需再确认 ●正点 是否紧贴无遮挡、准点文本过长时行是否变宽
+- **涉及**：`diagram_gui.lua`（updateLineList 准点段、showDiagram 横向滚动策略）
+
+## 已修复（2026-08-02 本轮）
+
+### 列车晚点1秒即被扣车到下一周期（waitingRequired 重写 + 晚点判定标准设置）
+- **需求**：外国玩家反馈"列车只要晚到 1 秒，就不继续行程、被扣到下一发车槽位，造成超长额外延误"；同时用户观察"到站后没有真正停车、到点再启动"。要求恢复旧版行为（晚点也发车），或加 3-5 分钟可配置容差
+- **根因（测试实锤）**：`timetable.beforeDepature`（timetable.lua）的 `arrivalTimeSec = (60*constraint[3])+constraint[4]` **复制粘贴 bug**——误用了发车字段[3][4]而非到达字段[1][2]。对**单槽位**（每周期一趟车，最常见场景）`getTimeUntilNextConstraint` 返回 3600 → `nextArrival = (3600+发车时刻)%3600 = 发车时刻` → 发车死区 `[dep, nextArr)` 为**空区间** → 公式永远判定"等待" → 任何晚于发车时刻到达的车（哪怕1秒）都被扣到下一周期。现有测试 `tests/timetable_tests.lua:76` 因此本来就在失败
+- **判定模型（重写 waitingRequired 的 ArrDep 分支）**：逐槽位计算"周期取到达时刻离当前时刻最近的那一趟"（`k = floor((time-arrTime+1800)/3600)` 取整到最近周期，避免早到被误判成对上一趟晚点）：
+  1. **早到/正点**（`time < 该槽绝对发车时刻`）→ 停靠等待到发车时刻
+  2. **晚点在容差内 或 判定标准=无** → **立即放行发车**（晚点1秒不再被扣）
+  3. **晚点超过判定标准** → **扣车到下一趟/下一周期**的发车时刻（多槽位=下一个时间槽，单槽位=下一小时）
+- **早到与"无"的行为**：选"无"时早到/正点的车仍会等自己的发车时刻（不会提前走），只有**晚点**的车立即放行——正是评论要的"恢复旧行为"
+- **晚点判定标准设置（时刻表窗口新增"设置"Tab）**：下拉框选项 无/5:00/10:00/20:00/30:00。存 `timetableObject._delayTolerance`（秒，0=无），随 `state.timetable` **永久存档**（关窗/退出重进都保留），经 `timetableChanged`+`sendScriptEvent` 从 GUI 线程同步到引擎线程（`waitingRequired` 在引擎线程用 `timetable.getDelayTolerance()` 读取）。新增 7 语言 × 2 key（`diagram_delay_tol_i18n`/`diagram_delay_none_i18n`）
+- **真停真启**：新增 `timetableHelper.forceDeparture()`（`api.cmd.make.setVehicleShouldDepart`）——`timetableCoroutine` 用 `timetable.isVehicleWaiting()` 检测"等待→放行"瞬间，在真正发车时刻强制启动车辆（仅靠 `setVehicleManualDeparture(false)` 可能不立即发车）。**不能放进通用 `startVehicle`**：那会对所有 AT_TERMINAL 车辆（含无时刻表线路）每帧强制发车，破坏游戏
+- **验证**：13 个 `beforeDepature`/`getNextConstraint` 相关测试全部通过（修复前 2 个失败）；lupa 模拟 19 个场景（单槽/双槽/跨午夜/各容差档/等待→放行 transition）全部符合预期，`forceCalls=1` 确认强制启动触发；全部 6 个 Lua 文件 `lua.compile` 语法通过
+- **保留**：`getTimeUntilDeparture >= 5` 提前返回（用户选定保守——到站后引擎默认停靠流程内先不干预，关门倒计时<5s 才介入）；`getNextConstraint`/`getTimeDifference`/`getTimeUntilNextConstraint` 未改（仅测试引用）；debounce 分支未动
+- **涉及**：`timetable.lua`（waitingRequired ArrDep 分支、isVehicleWaiting、get/setDelayTolerance、beforeDepature）、`timetable_helper.lua`（forceDeparture）、`timetable_gui.lua`（timetableCoroutine transition + 设置 Tab）、`strings.lua`
+
+## 已修复（2026-08-01 本轮）
+
+### 列车准点信息功能（晚点/正点/早点判定）
+- **需求**：确定列车实际到站时间，判定晚点/正点/早点（±10s 阈值）；显示"上一站"的到发判定（车在 A→B 途中显示 A 站早晚点，到 B 站刷新）；发车前显示到达判定，发车后显示发车判定
+- **判定规则**：`|diff|<=10s` 正点，正=晚 负=早。**发车前用到达判定**（早到 → 早点）；**发车后用发车判定**（发车晚点 → 晚点，发车正点 → 正点）。显示格式 `晚点MM:SS`/`早点MM:SS`。圆点+文本同色：正点白/早点绿/晚点红
+- **数据源（日志实锤）**：`lineStopDepartures[stopIndex+1]` 在车发车后写入**实际发车秒数**（如 time=360 发车 → 该值为 360），停站等待时 = 0，发车后 stopIndex 前进仍保留历史值；`state=2` 表示停稳，`stopIndex` 0 基
+- **检测位置**：**GUI 线程 `guiUpdate` 每秒节流扫描**（`timetableGUI.updatePunctuality`，game_script/timetable_gui.lua）。关键教训：**引擎线程 `update` 和 GUI 线程 `guiUpdate` 不共享 `_G`**（两个独立 Lua VM）——最初把检测放引擎线程、GUI 读 `_G._punctuality` 读到 nil（准点行不显示），移到 GUI 线程后同一线程直接可见
+- **状态机**：进站(state→2)记 `arrTime=getTime()` + 立即算到达判定（`arrTime - 计划arr`）；停站/发车后读 `lineStopDepartures[thisStopIndex+1]` 变非 0 → 定案该站发车判定；相位对齐 `phase = (depTime - 计划dep) 取最近3600倍数`，进站时相位未定也用到达时间对齐
+- **数据流**：检测结果存 `_G._punctuality[vehicleId]`（GUI 线程内共享，diagram_gui 直接读）
+- **UI（diagram_gui.lua）**：
+  1. 设置按钮（leftPanel 顶部）+ 弹窗勾选 10s 自动刷新/手动刷新（互斥 checkbox），存 `_G._diagramAutoRefresh`
+  2. 车次列表标题"颜色"按钮右侧加"准点信息"小标题（timetable-mono-sc 10px）
+  3. **准点信息显示在颜色方块右侧**（线路行内，非单独行）：每车一行 `[●圆点][准点文本]` 垂直排列；线路行高 `max(42, 车辆数×24)` 自适应，`totalHeight` 精确累加
+  4. **自动刷新与刷新按钮等同**：`menu.window:onStep`（每 GUI update 调用）每 10s（游戏世界时间 `getTime()`）调 `doRefreshData()`——完整重读时刻表+重绘运行图+刷新准点。最初只调 `updateLineList()` 导致改时刻表不刷新（bug）
+  5. 圆点颜色用样式类（非 RGB 硬编码）：`!timetable-punct-ontime/early/late`（正点白/早点绿/晚点红），`setStyleClassList` 必须用带 `!` 前缀的类
+- **性能**：GUI 线程每秒节流扫描所有车辆（`getLine2VehicleMap`），只读 3 个组件字段，状态不变时纯比较，开销可忽略
+- **API 注意**：`setFontSize` **不是有效 API**（文档无），字号用样式类；`onStep` 有效（每 gui update）；`setStyleClassList` 用带 `!` 前缀的样式类；字符串字面量**不能写 `\u{25CF}`**（Lua 5.1 不支持），需直接写 UTF-8 字节
+- **崩溃教训**：重构 `updateLineList` 误删 `for` 循环的 `end` → `require diagram_gui.lua` 加载失败 → 进存档即崩（`Lua exception: error loading module`）。**每次改 Lua 后必须用 lupa（Python Lua 5.1 绑定）做 `lua.compile` 语法验证再进游戏**
+- **涉及**：`timetable_gui.lua`（updatePunctuality + guiUpdate 调用）、`diagram_gui.lua`（设置弹窗/准点行/onStep 自动刷新/圆点）、`timetable_stylesheet.lua`（3 个准点颜色类）、`strings.lua`（7 语言 × 7 key）
+
+### 运行图只占窗口一部分/边框不贴合（LineRenderView 用实际渲染像素坐标）
+- **现象**：运行图灰色边框只画到绘制组件约 80% 处（右边、下边大片空白），且"底边框与时间标签之间有很大空"
+- **根因（日志实锤）**：`LineRenderView:addLine` 用的是**组件实际渲染像素坐标**（受游戏 UI 缩放因子 1.25 影响），而代码用**逻辑常量** `dw=870/dh=728`（= 窗口逻辑尺寸差），实际组件渲染为 1088×910 → 画在 (870,728) 只到 80%（870/1088≈0.8）。与 AbsoluteLayout 不同——AbsoluteLayout 的 `Rect` 坐标不随缩放（时间标签 `Rect.x=122` 落在 tlc 内 x=122 实测吻合），LineRenderView 却按实际像素渲染。二者坐标系行为不一致是排查关键
+- **修复**：
+  1. `refreshDiagram` 运行时从 `menu.renderArea:getContentRect()` 取**实际渲染尺寸**作为 `dw/dh`（布局完成后非零，失败回退逻辑尺寸）
+  2. 实测 renderArea 右缘 1714 超出窗口右缘 1700（布局偏移 14px）→ 动态计算 `窗口右缘 - renderArea左缘 - 2` 把 `dw` 收缩进窗口，保证边框/折线/网格最右端可见、右下角四线对齐
+  3. 边框视图 **bv 最后创建**（叠在最上层）：原顺序 边框→网格→折线，折线视图后加叠在边框上，59:59 到达点的十字标记会把右边框盖没；改为 网格→折线→边框，折线索引 `li+2`→`li+1`
+  4. 清理死代码 `secondsToX`/`timeToSeconds`（归一化方案失败后残留）
+- **试错记录**：先试"归一化坐标 0~1"（`addLine(0,0)-(1,1)`）→ 全部挤在左上角只剩一个像素点——**LineRenderView 不支持归一化**，必须用实际像素坐标；再试"只收右边框线"→ 右下角端点错位（右边框底端在 1072、下边框右端在 1088），且 59:59 到达点超窗仍把边框盖住——必须**整体收缩 dw + 边框叠顶层**
+- **经验**：LineRenderView 坐标系 = 组件实际渲染像素（随 UI 缩放），不是逻辑坐标也不是归一化；容器尺寸用逻辑值（引擎缩放显示），绘制坐标必须用 `getContentRect()` 实际值。往 LineRenderView 叠加绘制时，后添加的视图盖先添加的，边框等"轮廓"元素要最后添加
+- **涉及**：`diagram_gui.lua`（refreshDiagram dw/dh 获取 + 图层重排）、`diagram_gui.lua:40-45`（布局常量 STATION_PANEL_WIDTH 280→220、STATION_LABEL_WIDTH 150→110、TIME_LABEL_HEIGHT 30→22）
+
+### 运行图窗口布局放大（布局常量调整，运行图 +13% 宽）
+- **需求**：运行图默认窗口里绘制区域只占宽 64%，还有拓宽空间
+- **依据**（getContentRect 日志）：窗口 1200×780（缩放后 1500×975），renderArea 逻辑 870×720 占宽 64%、高 92%；左面板 280 + 站名标签列 150 + 时间刻度条 30 都可压缩
+- **修复**：`STATION_PANEL_WIDTH` 280→220、`STATION_LABEL_WIDTH` 150→110、`TIME_LABEL_HEIGHT` 30→22 → renderArea 逻辑 770×720 → 870×728（宽 +13%）。所有引用均走常量，`dw/dh` 自动重算
+- **回退**：备份 `diagram_gui.lua.bak_layout`
+- **涉及**：`diagram_gui.lua:43-45`
+
 ## 已修复（2026-07-31 本轮）
+
+### 更新 mod 后 Copy It! 图标变两个（gameInfo 工具栏重复添加，模块级守卫不抗重载）
+- **现象**：有国外玩家反馈"更新本 mod 后，okeating 的 Copy It! 在游戏里出现两个图标；卸载本 mod 后恢复成一个"
+- **根因**：`timetable_gui.lua`（game_script）的 `guiUpdate` 里用 `if not clockstate then` 向共享的 `gameInfo` 工具栏添加分割线/时钟/时刻表按钮/运行图按钮。`clockstate` 是**模块级 local**，Lua VM 重载模块（如 mod 更新）后归 nil → 创建块重跑，往同一工具栏**重复添加**本 mod 的组件；同栏其它 mod（Copy It! 等）也常因同款"模块级 local 守卫"被重置而重复添加自己的图标。本 mod 更新是触发那次脚本重载的**导火索**，但 Copy It! 图标变双的根因在它自身同样缺失跨重载守卫（修好本 mod 是必要但不充分）
+- **修复（改法2·幂等检查）**：进入创建块后先 `api.gui.util.getById("gameInfo.timetables.button")` 查引擎中是否已有按钮——
+  1. **已有**（模块重载场景）：不重建任何组件，只 `clockstate = _G._timetableClockLabel` 恢复时钟引用，时钟继续更新
+  2. **没有**（首次加载/引擎组件真被销毁）：走原创建逻辑，并 `_G._timetableClockLabel = clockstate` 把时钟引用存入 `_G`（_G 可跨模块重载存活，下次重载可恢复）
+- **优点**：比"只换 `_G` 守卫标志"更稳——纯标志在"引擎 UI 被销毁但标志残留"时会导致按钮永远不出现；getById 幂等检查能自愈重建。时钟引用也必须存 `_G`，否则重载后 `clockstate` 丢失、右上角时钟停走
+- **验证**：剥离注释/字符串后关键字配对平衡（if102+for24+while1+function89=216==end216）；中文注释确认 UTF-8 正确写入
+- **经验**：往 `gameInfo` 等共享工具栏加组件必须用"创建前 getById 幂等检查"或 `_G` 标志，不能用模块级 local 做守卫——再次验证 AGENTS.md "模块级 local 不抗重载"教训
+- **涉及**：`timetable_gui.lua`（game_script）`guiUpdate`（原 :1198 块，现为 getById 幂等分支）
 
 ### 刷新/展开后"内容在顶、滚动条在底"错位（setScrollOffset 同值 no-op）
 - **现象**：刷新或展开列表底部配置（如配置11）后，列表内容回到最上面，但滚动条仍停在原位置（底部）——继续下滑滑不动（滚动条已到最大值），往上滑一下让滚动条动起来后又能正常下滑。全部收起时展开正常，一旦展开过上面的配置再滚动到底部展开就触发

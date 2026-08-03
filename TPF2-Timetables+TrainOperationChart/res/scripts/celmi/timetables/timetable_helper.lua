@@ -1,5 +1,11 @@
 local timetableHelper = {}
 
+-- 调试汇总日志：受 _G._diagramDebug 开关控制（默认关闭），避免每次刷新/打开窗口的
+-- 高频汇总日志（getAllStops/getAllStationEntities 等）对玩家造成日志刷屏与 I/O 负担。
+local function dbgPrint(msg)
+    if _G._diagramDebug then print("[DiagramGUI] " .. msg) end
+end
+
 local wpEntityIdCache = {}
 local wpEntityIdCounter = 0
 local function getWpEntityId(wpRef)
@@ -153,6 +159,18 @@ function timetableHelper.stopVehicle(vehicle)
     if not(type(vehicle) == "number") then print("Expected String or Number") return false end
 
     pcall(function() api.cmd.sendCommand(api.cmd.make.setVehicleManualDeparture(vehicle,true)) end)
+    return nil
+end
+
+---@param vehicle number | string
+-- returns Null
+-- 强制车辆立即发车：仅在"等待→放行"瞬间调用，配合 stopVehicle 的
+-- setVehicleManualDeparture(true) 实现在到点后真正启动车辆。
+function timetableHelper.forceDeparture(vehicle)
+    if type(vehicle) == "string" then vehicle = tonumber(vehicle) end
+    if not(type(vehicle) == "number") then print("Expected String or Number") return false end
+
+    pcall(function() api.cmd.sendCommand(api.cmd.make.setVehicleShouldDepart(vehicle)) end)
     return nil
 end
 
@@ -645,7 +663,7 @@ function timetableHelper.getAllStationEntities()
             end
         end)
     end)
-    print("[timetableHelper] getAllStationEntities stations=" .. #list .. " filteredBus=" .. filteredBus)
+    dbgPrint("[timetableHelper] getAllStationEntities stations=" .. #list .. " filteredBus=" .. filteredBus)
     if not ok then
         print("[timetableHelper] getAllStationEntities error: " .. tostring(err))
     end
@@ -698,7 +716,7 @@ function timetableHelper.getAllStops(line)
         local sgType = type(sgEntity)
         if sgEntity == nil or type(sgEntity) ~= "number" then
             sgEntity = 0
-            print("[DiagramGUI] getAllStops line=" .. tostring(line) .. " stopIdx=" .. tostring(k) .. " stationGroup=" .. tostring(v.stationGroup) .. " type=" .. sgType .. " -> classified as WAYPOINT")
+            dbgPrint("[DiagramGUI] getAllStops line=" .. tostring(line) .. " stopIdx=" .. tostring(k) .. " stationGroup=" .. tostring(v.stationGroup) .. " type=" .. sgType .. " -> classified as WAYPOINT")
         end
         if sgEntity == 0 then
             wpClassified = wpClassified + 1
@@ -736,33 +754,39 @@ function timetableHelper.getAllStops(line)
                 elseif type(v.waypoints) == "table" then
                     wpCount = #v.waypoints
                 end
+                -- 逐条验证、遇到无效/越界实体即截断：Line.Stop.waypoints 是 userdata，
+                -- 其 # 可能返回虚高（无路径点的车站概率性多出几个"路径点"即此原因），
+                -- 实体也可能已被删除。越界索引会返回 nil 或抛错（pcall 捕获），以此截断。
+                -- 注意：不能用"是否有 NAME 组件"判断有效——未命名路径点可能没有 NAME 组件，
+                -- 一旦第一个 waypoint 校验失败就 break，会导致路径点全部消失。
                 for i = 1, wpCount do
                     local ok, wpRef = pcall(function() return v.waypoints[i] end)
-                    if ok and wpRef ~= nil then
-                        flatIdx = flatIdx + 1
-                        local wpName = UIStrings.waypoint .. flatIdx
-                        pcall(function()
-                            local nc = api.engine.getComponent(wpRef, api.type.ComponentType.NAME)
-                            if nc and nc.name then wpName = nc.name end
-                        end)
-            local gwKey = getWpPersistentKey(wpRef, sgEntity, i)
-            res[flatIdx] = {
-                id = "wp_" .. k .. "_" .. i,
-                entityId = gwKey,
-                name = wpName,
-                type = "waypoint",
-                stopIndex = k,
-                flatIndex = flatIdx,
-                parentStationGroup = sgEntity,
-                gwKey = gwKey,
-            }
-                    end
+                    if not (ok and wpRef ~= nil) then break end
+                    flatIdx = flatIdx + 1
+                    wpClassified = wpClassified + 1
+                    local wpName = nil
+                    pcall(function()
+                        local nc = api.engine.getComponent(wpRef, api.type.ComponentType.NAME)
+                        if nc and nc.name then wpName = nc.name end
+                    end)
+                    if not wpName then wpName = UIStrings.waypoint .. flatIdx end
+                    local gwKey = getWpPersistentKey(wpRef, sgEntity, i)
+                    res[flatIdx] = {
+                        id = "wp_" .. k .. "_" .. i,
+                        entityId = gwKey,
+                        name = wpName,
+                        type = "waypoint",
+                        stopIndex = k,
+                        flatIndex = flatIdx,
+                        parentStationGroup = sgEntity,
+                        gwKey = gwKey,
+                    }
                 end
             end
         end
     end
 
-    print("[DiagramGUI] getAllStops line=" .. tostring(line) .. " rawStops=" .. rawStops .. " stations=" .. stClassified .. " waypoints=" .. wpClassified)
+    dbgPrint("[DiagramGUI] getAllStops line=" .. tostring(line) .. " rawStops=" .. rawStops .. " stations=" .. stClassified .. " waypoints=" .. wpClassified)
     return res
 end
 

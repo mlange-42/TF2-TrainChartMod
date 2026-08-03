@@ -21,6 +21,7 @@ local state = nil
 
 local timetableChanged = false
 local clearConstraintWindowLaterHACK = nil
+local stationSummaryRefreshDue = nil  -- 中间站表摘要延迟刷新的游戏时间（秒）
 
 local stationTableScrollOffset
 local lineTableScrollOffset
@@ -56,8 +57,12 @@ local UIStrings = {
 		wp_tooltip = _("diagram_wp_tooltip_i18n"),
 		name_label = _("diagram_name_i18n"),
 		rename_hint = _("diagram_rename_hint_i18n"),
+		refresh = _("diagram_refresh_i18n"),
 		title_short = _("diagram_title_short_i18n"),
-}
+		settings = _("diagram_settings_i18n"),
+		delay_tol = _("diagram_delay_tol_i18n"),
+		delay_none = _("diagram_delay_none_i18n"),
+	}
 
 local local_styles = {
     zh_CN = "timetable-mono-sc",
@@ -344,6 +349,44 @@ function timetableGUI.showLineMenu()
     wrapper2:setLayout(UIState.floatingLayoutStationTab)
     menu.tabWidget:addTab(api.gui.comp.TextView.new(UIStrings.stations),wrapper2)
 
+    -- 设置 Tab：晚点判定标准（全局设置，随存档永久保存；0=无）
+    local wrapper3 = api.gui.comp.Component.new("wrapper3")
+    local settingsLayout = api.gui.layout.BoxLayout.new("VERTICAL")
+    wrapper3:setLayout(settingsLayout)
+    local tolRow = api.gui.comp.Component.new("delayTolRow")
+    local tolRowLayout = api.gui.layout.BoxLayout.new("HORIZONTAL")
+    tolRow:setLayout(tolRowLayout)
+    local tolLabel = api.gui.comp.TextView.new(UIStrings.delay_tol)
+    tolLabel:setStyleClassList({"timetable-mono-sc"})
+    tolRowLayout:addItem(tolLabel)
+    -- 选项：无 / 5:00 / 10:00 / 20:00 / 30:00（秒数）
+    local TOL_OPTIONS = {
+        { 0,    UIStrings.delay_none },
+        { 300,  "5:00" },
+        { 600,  "10:00" },
+        { 1200, "20:00" },
+        { 1800, "30:00" },
+    }
+    local tolCombo = api.gui.comp.ComboBox.new()
+    for _, o in ipairs(TOL_OPTIONS) do tolCombo:addItem(o[2]) end
+    local curTol = timetable.getDelayTolerance()
+    local curTolIdx = 0
+    for i, o in ipairs(TOL_OPTIONS) do
+        if o[1] == curTol then curTolIdx = i - 1 end
+    end
+    tolCombo:setSelected(curTolIdx, false)
+    tolCombo:onIndexChanged(function(i)
+        if i == -1 then return end
+        local v = TOL_OPTIONS[i + 1] and TOL_OPTIONS[i + 1][1] or 0
+        pcall(function()
+            timetable.setDelayTolerance(v)
+            timetableChanged = true
+        end)
+    end)
+    tolRowLayout:addItem(tolCombo)
+    settingsLayout:addItem(tolRow)
+    menu.tabWidget:addTab(api.gui.comp.TextView.new(UIStrings.settings), wrapper3)
+
     menu.tabWidget:onCurrentChanged(function(i)
         if i == 1 then
             timetableGUI.fillStationTabStationTable()
@@ -374,6 +417,7 @@ function timetableGUI.showLineMenu()
         menu.stationTabScrollArea = nil
         menu.stationTabLinesScrollArea = nil
         clearConstraintWindowLaterHACK = nil
+        stationSummaryRefreshDue = nil
         timetableChanged = false
         _G._timetableVisible = false
         menu.window = nil
@@ -726,6 +770,36 @@ function timetableGUI.clearConstraintWindow()
     menu.constraintTable:deleteRows(1, menu.constraintTable:getNumRows())
 end
 
+-- 整表重建右侧约束窗口（新建 Table + 重新填充）。旧组件清除靠"重建新 Table"而非
+-- deleteRows/deleteAll——引擎对表格 deleteRows/deleteAll 可能未完全释放嵌套的
+-- DoubleSpinBox 组件，导致时间输入框"重影"（旧值叠在新值上）。仅重建 UI，不改数据；
+-- 当前选中站由 UIState.currentlySelectedStationIndex 决定。
+function timetableGUI.rebuildConstraintWindow(lineID)
+    if not lineID then return end
+    timetableGUI.initConstraintTable()
+    timetableGUI.fillConstraintTable(UIState.currentlySelectedStationIndex or 0, lineID)
+end
+
+-- 手动"刷新"按钮：保存当前所有输入（时间/路径点名/通过时间——onChange 已逐位写入数据）
+-- 并整表重建 中间站表 + 右侧约束窗口，让界面各处立即显示最新值，同时触发跨线程同步。
+-- 用 HACK 延迟到下一帧执行，避免在按钮点击事件内重建自身组件。
+function timetableGUI.refreshTimetableUI(lineID)
+    if not lineID then return end
+    timetableChanged = true
+    clearConstraintWindowLaterHACK = function()
+        timetableGUI.initStationTable()
+        timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+        timetableGUI.rebuildConstraintWindow(lineID)
+    end
+end
+
+-- 中间站表摘要延迟刷新：onChange 逐位触发时不断重置计时，输入停顿约 1s（游戏时间）后
+-- 才重建中间站表，让该行条件摘要（到发时间等）显示新值。只刷中间表、不重建右侧约束窗口，
+-- 避免打断 SpinBox 输入焦点（AGENTS.md "13:30 变 00:30" 教训）。
+function timetableGUI.scheduleStationSummaryRefresh()
+    stationSummaryRefreshDue = timetableHelper.getTime() + 1
+end
+
 function timetableGUI.fillConstraintTable(index, lineID)
     --initial cleanup
     if index == -1 then
@@ -752,6 +826,8 @@ function timetableGUI.fillConstraintTable(index, lineID)
             if i == -1 then return end
             timetableChanged = true
             if i == 1 then
+                -- 先清残留行再构建，避免反复切换 None/Passing 时旧输入框叠加"重影"
+                timetableGUI.clearConstraintWindow()
                 timetableGUI.makePassingWindow(lineID, stopInfo.id, stopInfo.gwKey)
             else
                 timetableGUI.clearConstraintWindow()
@@ -762,8 +838,14 @@ function timetableGUI.fillConstraintTable(index, lineID)
         infoImage:setTooltip(UIStrings.wp_tooltip)
         infoImage:setName("timetable-info-icon")
 
-        local table = api.gui.comp.Table.new(2, 'NONE')
-        table:addRow({infoImage, comboBox})
+        -- 刷新按钮：一键保存所有时间/路径点名/通过时间并刷新时刻表界面（含路径点）
+        local refreshBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(UIStrings.refresh), true)
+        refreshBtn:onClick(function()
+            timetableGUI.refreshTimetableUI(lineID)
+        end)
+
+        local table = api.gui.comp.Table.new(3, 'NONE')
+        table:addRow({infoImage, comboBox, refreshBtn})
         menu.constraintTable:addRow({table})
         comboBox:setSelected(selectedIdx, false)
 
@@ -784,23 +866,33 @@ function timetableGUI.fillConstraintTable(index, lineID)
             timetableGUI.initStationTable()
             timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
             UIState.currentlySelectedConstraintType = i
-
-            timetableGUI.clearConstraintWindow()
-            if i == 1 then
-                timetableGUI.makeArrDepWindow(lineID, stopInfo.stopIndex)
-            elseif i == 2 then
-                timetableGUI.makeDebounceWindow(lineID, stopInfo.stopIndex)
-            end
+            -- 整表重建右侧约束窗口（新建 Table + 重新填充），彻底清除旧 DoubleSpinBox，
+            -- 避免 deleteRows/deleteAll 未完全释放组件导致时间输入框"重影"
+            local rebuildIdx = (stopInfo and stopInfo.flatIndex and stopInfo.flatIndex - 1)
+                              or UIState.currentlySelectedStationIndex or 0
+            timetableGUI.initConstraintTable()
+            timetableGUI.fillConstraintTable(rebuildIdx, lineID)
         end)
 
         local infoImage = api.gui.comp.ImageView.new("ui/info_small.tga")
         infoImage:setTooltip(UIStrings.tooltip)
         infoImage:setName("timetable-info-icon")
 
-        local table = api.gui.comp.Table.new(2, 'NONE')
-        table:addRow({infoImage, comboBox})
+        -- 刷新按钮：一键保存所有到发/间隔时间并刷新时刻表界面
+        local refreshBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(UIStrings.refresh), true)
+        refreshBtn:onClick(function()
+            timetableGUI.refreshTimetableUI(lineID)
+        end)
+
+        local table = api.gui.comp.Table.new(3, 'NONE')
+        table:addRow({infoImage, comboBox, refreshBtn})
         menu.constraintTable:addRow({table})
-        comboBox:setSelected(constraintIndex, true)
+        comboBox:setSelected(constraintIndex, false)
+        if constraintIndex == 1 then
+            timetableGUI.makeArrDepWindow(lineID, stopInfo.stopIndex)
+        elseif constraintIndex == 2 then
+            timetableGUI.makeDebounceWindow(lineID, stopInfo.stopIndex)
+        end
     end
 
     menu.scrollAreaConstraint:invokeLater(
@@ -823,8 +915,7 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
         clearConstraintWindowLaterHACK = function()
             timetableGUI.initStationTable()
             timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
-            timetableGUI.clearConstraintWindow()
-            timetableGUI.makeArrDepWindow(lineID, stationID)
+            timetableGUI.rebuildConstraintWindow(lineID)
         end
     end)
 
@@ -856,6 +947,7 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
         arrivalMin:onChange(function(value)
             timetable.updateArrDep(lineID, stationID, k, 1, value)
             timetableChanged = true
+            timetableGUI.scheduleStationSummaryRefresh()
             -- 注意：不要在 onChange 里重建 UI（initStationTable/fillStationTable）。
             -- 输入过程中每次重建会打断 SpinBox 焦点/值，导致"13:30 变 00:30"的概率性丢值。
         end)
@@ -867,6 +959,7 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
         arrivalSec:onChange(function(value)
             timetable.updateArrDep(lineID, stationID, k, 2, value)
             timetableChanged = true
+            timetableGUI.scheduleStationSummaryRefresh()
         end)
 
         local deleteButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("X") ,true)
@@ -876,8 +969,7 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
             clearConstraintWindowLaterHACK = function()
                 timetableGUI.initStationTable()
                 timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
-                timetableGUI.clearConstraintWindow()
-                timetableGUI.makeArrDepWindow(lineID, stationID)
+                timetableGUI.rebuildConstraintWindow(lineID)
             end
         end)
 
@@ -901,6 +993,7 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
         departureMin:onChange(function(value)
             timetable.updateArrDep(lineID, stationID, k, 3, value)
             timetableChanged = true
+            timetableGUI.scheduleStationSummaryRefresh()
         end)
 
         local departureSec = api.gui.comp.DoubleSpinBox.new()
@@ -910,6 +1003,7 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
         departureSec:onChange(function(value)
             timetable.updateArrDep(lineID, stationID, k, 4, value)
             timetableChanged = true
+            timetableGUI.scheduleStationSummaryRefresh()
         end)
 
 
@@ -950,6 +1044,7 @@ function timetableGUI.makeDebounceWindow(lineID, stationID)
     debounceMin:onChange(function(value)
         timetable.updateDebounce(lineID, stationID,  1, value)
         timetableChanged = true
+        timetableGUI.scheduleStationSummaryRefresh()
     end)
 
     if condition2 and condition2[1] then
@@ -964,6 +1059,7 @@ function timetableGUI.makeDebounceWindow(lineID, stationID)
     debounceSec:onChange(function(value)
         timetable.updateDebounce(lineID, stationID, 2, value)
         timetableChanged = true
+        timetableGUI.scheduleStationSummaryRefresh()
     end)
     if condition2 and condition2[2] then
         debounceSec:setValue(condition2[2],false)
@@ -990,28 +1086,35 @@ function timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
     local ok, inputField = pcall(function()
         return api.gui.comp.TextInputField.new("")
     end)
+    -- 提交名字（全局改名：_G._gwNames + timetableObject 双写，含 per-line 覆盖），不要破坏全局语义
+    local function commitName(text)
+        pcall(function()
+            timetable.setWaypointName(lineID, wpEntity, text)
+            if gwKey then
+                timetable.setGlobalWaypointName(gwKey, text)
+            end
+            timetableChanged = true
+        end)
+    end
+    -- 立即刷新：重建中间站表 + 右侧约束窗口，让新名字全局生效（与 +/X 同款重建路径）
+    local function refreshWaypointUI()
+        clearConstraintWindowLaterHACK = function()
+            timetableGUI.initStationTable()
+            timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+            timetableGUI.rebuildConstraintWindow(lineID)
+        end
+    end
     if ok and inputField then
         nameInput = inputField
         if currentName and #currentName > 0 then
             nameInput:setText(currentName, false)
         end
         nameInput:onChange(function(text)
-            pcall(function()
-                timetable.setWaypointName(lineID, wpEntity, text)
-                if gwKey then
-                    timetable.setGlobalWaypointName(gwKey, text)
-                end
-                timetableChanged = true
-            end)
+            commitName(text)
         end)
         pcall(function()
             nameInput:onFocusLost(function()
-                clearConstraintWindowLaterHACK = function()
-                    timetableGUI.initStationTable()
-                    timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
-                    timetableGUI.clearConstraintWindow()
-                    timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
-                end
+                refreshWaypointUI()
             end)
         end)
     end
@@ -1019,6 +1122,7 @@ function timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
     nameTable:setColWidth(0,80)
     local nameLabel = api.gui.comp.TextView.new(UIStrings.name_label)
     if nameInput then
+        -- 名字由 onChange 逐字写入 + 顶部"刷新"按钮统一保存重建，不再单独设保存按钮
         nameTable:addRow({nameLabel, nameInput})
     else
         local showName = api.gui.comp.TextView.new(currentName and #currentName > 0 and currentName or UIStrings.rename_hint)
@@ -1039,8 +1143,7 @@ function timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
         clearConstraintWindowLaterHACK = function()
             timetableGUI.initStationTable()
             timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
-            timetableGUI.clearConstraintWindow()
-            timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
+            timetableGUI.rebuildConstraintWindow(lineID)
         end
     end)
 
@@ -1067,6 +1170,7 @@ function timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
             minSpinner:onChange(function(value)
                 timetable.updateWaypointPassingTimeEntry(lineID, wpEntity, k, 1, value)
                 timetableChanged = true
+                timetableGUI.scheduleStationSummaryRefresh()
             end)
 
             local secSpinner = api.gui.comp.DoubleSpinBox.new()
@@ -1076,6 +1180,7 @@ function timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
             secSpinner:onChange(function(value)
                 timetable.updateWaypointPassingTimeEntry(lineID, wpEntity, k, 2, value)
                 timetableChanged = true
+                timetableGUI.scheduleStationSummaryRefresh()
             end)
 
             local deleteBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new("X"), true)
@@ -1085,8 +1190,7 @@ function timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
                 clearConstraintWindowLaterHACK = function()
                     timetableGUI.initStationTable()
                     timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
-                    timetableGUI.clearConstraintWindow()
-                    timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
+                    timetableGUI.rebuildConstraintWindow(lineID)
                 end
             end)
 
@@ -1101,15 +1205,178 @@ end
 -------------------------------------------------------------
 
 
+-- 准点检测（引擎线程，存档加载后持续运行，不依赖运行图窗口打开）：
+-- 状态机扫描所有车辆，检测 进站(state→2)/发车(lineStopDepartures 变非0) 瞬间，
+-- 记录实际到发时间，与时刻表 ArrDep 计划时间对比，算晚点/正点/早点，存 _G._punctuality。
+-- 显示的是"上一站"的到发判定（用户需求：列车在 A→B 途中显示 A 站的早晚点）。
+--
+-- _G._punctuality[vehicleId] = {
+--   lineId, lineName, lastStopIndex, lastState,
+--   lastArrTime, lastDepTime,          -- 上一站实际到/发秒（game 绝对秒）
+--   plArr, plDep,                      -- 上一站选定的那套时刻表 绝对计划到/发秒
+--   arrDiff, depDiff,                  -- 上一站 到/发 偏差秒（正=晚 负=早）
+--   arrPunct, depPunct,                -- "early"/"late"/"ontime"（上一站）
+--   stationName,                       -- 上一站站名
+-- }
+local punctualityState = {}
+
+-- 从该站的多套 ArrDep 时刻中选出列车实际运行的那一套（绝对到达时刻离实际到达最近），
+-- 返回该套的绝对计划到/发时刻。stationNumber 从 1 开始。
+-- 旧实现 getPlannedTime 硬编码取 conds[1]（第一套）：一条线路配多套时刻表时，
+-- 列车实际跑第二套也拿第一套判正晚点（如站2 第一套 26:30 / 第二套 51:00，
+-- 列车 26:45 到会按 51:00 判，出现几十分钟的假晚点/假早点）。
+local function getPlannedArrDep(lineID, stationNumber, actualArrTime)
+    local ct = timetable.getConditionType(lineID, stationNumber)
+    if ct ~= "ArrDep" then return nil, nil end
+    local conds = timetable.getConditions(lineID, stationNumber, "ArrDep")
+    if not conds or #conds == 0 then return nil, nil end
+    local bestArr, bestDep = nil, nil
+    local bestDist = math.huge
+    for _, c in ipairs(conds) do
+        local arr = (c[1] * 60 + c[2]) % 3600
+        local dep = (c[3] * 60 + c[4]) % 3600
+        -- 周期取"到达时刻离实际到达最近"的那一趟（与 waitingRequired 槽位分配一致）
+        local k = math.floor((actualArrTime - arr + 1800) / 3600)
+        local absArr = arr + 3600 * k
+        local absDep = dep + 3600 * k
+        if absDep < absArr then absDep = absDep + 3600 end
+        local dist = math.abs(actualArrTime - absArr)
+        if dist < bestDist then
+            bestDist = dist
+            bestArr, bestDep = absArr, absDep
+        end
+    end
+    return bestArr, bestDep
+end
+
+-- 晚点/正点/早点判定：|diff|<=10s 正点，正=晚 负=早
+local function classify(diff)
+    if not diff then return "ontime" end
+    if diff > 10 then return "late" end
+    if diff < -10 then return "early" end
+    return "ontime"
+end
+
+function timetableGUI.updatePunctuality()
+    if not _G._punctuality then _G._punctuality = {} end
+    local now = timetableHelper.getTime()
+    if not _G._punctNext then _G._punctNext = 0 end
+    if now < _G._punctNext then return end
+    _G._punctNext = now + 1  -- 每秒扫一次（getTime 整秒）
+
+    local vehicleMap = api.engine.system.transportVehicleSystem.getLine2VehicleMap()
+    for lineID, vehicles in pairs(vehicleMap) do
+        local lineName = nil
+        pcall(function()
+            local nc = api.engine.getComponent(lineID, api.type.ComponentType.NAME)
+            if nc and nc.name then lineName = nc.name end
+        end)
+        if vehicles then
+            for _, vehicle in pairs(vehicles) do
+                local vId = tostring(vehicle)
+                local okC, vc = pcall(function()
+                    return api.engine.getComponent(vehicle, 70)
+                end)
+                if okC and vc then
+                    local st = punctualityState[vId]
+                    if not st then
+                        st = {lineId = lineID, lineName = lineName, thisStopIndex = vc.stopIndex,
+                              lastState = vc.state, arrTime = nil, depTime = nil, arrDone = false,
+                              plArr = nil, plDep = nil,
+                              arrDiff = nil, depDiff = nil, arrPunct = nil, depPunct = nil,
+                              stationName = nil}
+                        punctualityState[vId] = st
+                    end
+
+                    -- 进站检测：state 从 非2 → 2（停稳）记录当前站到达时间；
+                    -- 或 停靠站已变化（快速进出站漏拍 state 1/上次扫描未更新 thisStopIndex 时兜底）
+                    if vc.state == 2 and (st.lastState ~= 2 or vc.stopIndex ~= st.thisStopIndex) then
+                        st.thisStopIndex = vc.stopIndex
+                        st.arrTime = now
+                        st.depTime = nil
+                        st.arrDone = false
+                        st.stationName = nil
+                        pcall(function()
+                            local sg = api.engine.getComponent(vc.stopIndex, api.type.ComponentType.NAME)
+                            if sg and sg.name then st.stationName = sg.name end
+                        end)
+                        -- 进站立即用到达偏差判定（早到/正点/晚点），发车前即可显示。
+                        -- 多套时刻表时自动选"绝对到达时刻离实际到达最近"的那一套（getPlannedArrDep），
+                        -- 避免列车跑第二套却拿第一套判正晚点。
+                        local plArr, plDep = getPlannedArrDep(lineID, vc.stopIndex + 1, now)
+                        if plArr and plDep then
+                            st.plArr, st.plDep = plArr, plDep
+                            st.arrDiff = st.arrTime - plArr
+                            st.arrPunct = classify(st.arrDiff)
+                        end
+                    end
+
+                    -- 发车检测：读当前停靠站的实际发车时间（lineStopDepartures[thisStopIndex+1]）。
+                    -- 该值在车发车后写入（如 time=360 发车 → 值 360），且发车后 stopIndex 前进、
+                    -- state 变 1 时仍保留历史值，故不依赖 state==2，只要该站 dep 从 0/旧值变非 0 即判定发车。
+                    -- 不依赖 st.arrTime：即使到站事件漏拍（短停站/加载时已停稳），发车事件也能被捕获并给出发车判定。
+                    if not st.arrDone then
+                        local depTime = nil
+                        if vc.lineStopDepartures and st.thisStopIndex then
+                            local d = vc.lineStopDepartures[st.thisStopIndex + 1]
+                            if d and d > 0 then depTime = math.floor(d / 1000) end
+                        end
+                        -- 发车定案：引擎已给出该站实际发车秒
+                        if depTime and depTime ~= st.depTime then
+                            st.depTime = depTime
+                            st.arrDone = true
+                            -- 复用进站时选定的那套时刻表；进站未判定的兜底重选
+                            local plArr, plDep = st.plArr, st.plDep
+                            if not plArr then
+                                plArr, plDep = getPlannedArrDep(lineID, st.thisStopIndex + 1, st.arrTime or depTime)
+                                st.plArr, st.plDep = plArr, plDep
+                            end
+                            if plArr and plDep then
+                                if st.arrTime then
+                                    st.arrDiff = st.arrTime - plArr
+                                    st.arrPunct = classify(st.arrDiff)
+                                end
+                                st.depDiff = depTime - plDep
+                                st.depPunct = classify(st.depDiff)
+                            end
+                        end
+                    end
+
+                    -- 站变化（前进）：当前停靠站改变，重新开始新站采集
+                    if vc.stopIndex ~= st.thisStopIndex and vc.state ~= 2 then
+                        -- 行驶中换站，重置待采集状态（等下次进站）
+                        st.thisStopIndex = vc.stopIndex
+                        if st.arrDone then
+                            -- 上一站已定案，保留其判定；准备采新站
+                        end
+                    end
+
+                    st.lastState = vc.state
+                    st.lineId = lineID
+                    st.lineName = lineName or st.lineName
+                end
+            end
+        end
+    end
+
+    -- 同步到 _G 供 GUI 线程读取（GUI 线程读 _G 即可，无需跨线程事件）
+    _G._punctuality = punctualityState
+end
+
 function timetableGUI.timetableCoroutine()
     while true do
         local vehiclesWithLines = timetableHelper.getAllTimetableRailVehicles(timetable.hasTimetable)
         for _,vehicle in pairs(vehiclesWithLines) do
             --if timetableHelper.isInStation(vehicle) then
-                if timetable.waitingRequired(tostring(vehicle)) then
-                    timetableHelper.stopVehicle(tostring(vehicle))
+                local vehicleStr = tostring(vehicle)
+                -- 记录"等待→放行"瞬间：放行时若之前正被扣车，则调 forceDeparture
+                -- 真正启动车辆（否则仅 setVehicleManualDeparture(false) 可能不立即发车）。
+                local wasWaiting = timetable.isVehicleWaiting(vehicleStr)
+                if timetable.waitingRequired(vehicleStr) then
+                    timetableHelper.stopVehicle(vehicleStr)
                 else
-                    timetableHelper.startVehicle(tostring(vehicle))
+                    timetableHelper.startVehicle(vehicleStr)
+                    if wasWaiting then timetableHelper.forceDeparture(vehicleStr) end
                 end
             --end
             coroutine.yield()
@@ -1166,6 +1433,8 @@ function data()
                 if not err then print(msg) end
             end
 
+            -- 准点检测移到 guiUpdate（GUI 线程）执行：
+            -- GUI 线程能读引擎 API，且与 diagram_gui 同线程，数据写 _G._punctuality 直接可见
             local to = timetable.getTimetableObject()
             if to then
                 for _, entry in pairs(to) do
@@ -1185,6 +1454,8 @@ function data()
             if not _G._gwNames and state and state.timetable and state.timetable._gwNames then
                 _G._gwNames = state.timetable._gwNames
             end
+            -- 准点检测：GUI 线程每秒节流扫描（与 diagram_gui 同线程，_G 数据直接可见）
+            pcall(function() timetableGUI.updatePunctuality() end)
             if timetableChanged or _G._diagramForceSync then
                 _G._diagramForceSync = nil
                 pcall(function() game.interface.sendScriptEvent("timetableUpdate", "", timetable.getTimetableObject()) end)
@@ -1194,46 +1465,69 @@ function data()
                 clearConstraintWindowLaterHACK()
                 clearConstraintWindowLaterHACK = nil
             end
+            -- 中间站表摘要延迟刷新：SpinBox 输入停止约 1s 后重建中间表，让条件摘要显示新到发时间
+            if stationSummaryRefreshDue and timetableHelper.getTime() >= stationSummaryRefreshDue then
+                stationSummaryRefreshDue = nil
+                pcall(function()
+                    if UIState.currentlySelectedLineTableIndex ~= nil and menu.stationTable then
+                        timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+                    end
+                end)
+            end
 
             if not clockstate then
-				-- element for the divider
-				local line = api.gui.comp.Component.new("VerticalLine")
-				-- element for the icon
-                local icon = api.gui.comp.ImageView.new("ui/clock_small.tga")
-                -- element for the time
-				clockstate = api.gui.comp.TextView.new("gameInfo.time.label")
+                -- 模块重载防御（改法2·幂等检查）：clockstate 是模块级 local，Lua VM 重载模块后归 nil，
+                -- 本块会重跑，向 gameInfo 工具栏重复添加分割线/时钟/按钮——也会连带其它往同一工具栏
+                -- 加图标的 mod（如 Copy It!）出现"两个图标"。创建前先 getById 查引擎中是否已有按钮：
+                -- 重载后组件在引擎中存活（getById 命中）→ 不重复创建，只从 _G 恢复时钟引用；
+                -- 组件被销毁（getById 返回 nil）→ 重新创建，自愈。
+                local existingTtBtn = nil
+                pcall(function() existingTtBtn = api.gui.util.getById("gameInfo.timetables.button") end)
+                if existingTtBtn then
+                    -- 重载场景：引擎中按钮仍存活，不重复创建；从 _G 恢复时钟引用（时钟继续走）。
+                    -- 极端情况若 _G 引用也丢失，时钟停止更新但按钮保持可用。
+                    clockstate = _G._timetableClockLabel
+                else
+                    -- element for the divider
+                    local line = api.gui.comp.Component.new("VerticalLine")
+                    -- element for the icon
+                    local icon = api.gui.comp.ImageView.new("ui/clock_small.tga")
+                    -- element for the time
+                    clockstate = api.gui.comp.TextView.new("gameInfo.time.label")
+                    _G._timetableClockLabel = clockstate
 
-                local buttonLabel = gui.textView_create("gameInfo.timetables.label", UIStrings.timetable)
+                    local buttonLabel = gui.textView_create("gameInfo.timetables.label", UIStrings.timetable)
 
-                local button = gui.button_create("gameInfo.timetables.button", buttonLabel)
-                button:onClick(function ()
-                    local err, msg = pcall(timetableGUI.showLineMenu)
-                    if not err then
-                        menu.window = nil
-                        print(msg)
+                    local button = gui.button_create("gameInfo.timetables.button", buttonLabel)
+                    button:onClick(function ()
+                        local err, msg = pcall(timetableGUI.showLineMenu)
+                        if not err then
+                            menu.window = nil
+                            print(msg)
+                        end
+                    end)
+                    game.gui.boxLayout_addItem("gameInfo.layout", button.id)
+
+                    -- 添加运行图按钮
+                    local diagramButtonLabel = gui.textView_create("gameInfo.diagram.label", UIStrings.title_short)
+                    local diagramButton = gui.button_create("gameInfo.diagram.button", diagramButtonLabel)
+                    diagramButton:onClick(function ()
+                        local err, msg = pcall(diagramGUI.showDiagram)
+                        if not err then
+                            print(msg)
+                        end
+                    end)
+                    game.gui.boxLayout_addItem("gameInfo.layout", diagramButton.id)
+
+                    -- add elements to ui
+                    local gameInfo = api.gui.util.getById("gameInfo")
+                    if gameInfo then
+                        local gameInfoLayout = gameInfo:getLayout()
+                        gameInfoLayout:addItem(line)
+                        gameInfoLayout:addItem(icon)
+                        gameInfoLayout:addItem(clockstate)
                     end
-                end)
-                game.gui.boxLayout_addItem("gameInfo.layout", button.id)
-                
-                -- 添加运行图按钮
-                local diagramButtonLabel = gui.textView_create("gameInfo.diagram.label", UIStrings.title_short)
-                local diagramButton = gui.button_create("gameInfo.diagram.button", diagramButtonLabel)
-                diagramButton:onClick(function ()
-                    local err, msg = pcall(diagramGUI.showDiagram)
-                    if not err then
-                        print(msg)
-                    end
-                end)
-                game.gui.boxLayout_addItem("gameInfo.layout", diagramButton.id)
-				
-			-- add elements to ui
-			local gameInfo = api.gui.util.getById("gameInfo")
-			if gameInfo then
-				local gameInfoLayout = gameInfo:getLayout()
-				gameInfoLayout:addItem(line)
-				gameInfoLayout:addItem(icon)
-				gameInfoLayout:addItem(clockstate)
-			end
+                end
             end
 
             local time = timetableHelper.getTime()

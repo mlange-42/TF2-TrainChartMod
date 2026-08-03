@@ -40,9 +40,9 @@ end
 local WINDOW_WIDTH = 1200
 local WINDOW_HEIGHT = 780
 local TITLE_BAR_H = 30
-local STATION_PANEL_WIDTH = 280
-local TIME_LABEL_HEIGHT = 30
-local STATION_LABEL_WIDTH = 150
+local STATION_PANEL_WIDTH = 220
+local TIME_LABEL_HEIGHT = 22
+local STATION_LABEL_WIDTH = 110
 
 local LINE_COLORS = {
     {1.0, 0.2, 0.2, 1.0}, {0.2, 0.6, 1.0, 1.0},
@@ -58,7 +58,13 @@ local function getColor(index)
     return api.type.Vec4f.new(c[1], c[2], c[3], c[4])
 end
 
+-- 错误日志：始终输出（仅出错时触发，性能无负担）
 local function debugPrint(msg) print("[DiagramGUI] " .. msg) end
+-- 调试汇总日志：受 _G._diagramDebug 开关控制（默认关闭），避免每次刷新/保存的
+-- 高频汇总日志对玩家造成日志刷屏与 I/O 负担。排查问题时在控制台 `_G._diagramDebug=true`。
+local function dbgPrint(msg)
+    if _G._diagramDebug then print("[DiagramGUI] " .. msg) end
+end
 
 local D = {
     title = _("diagram_title_i18n"),
@@ -75,7 +81,18 @@ local D = {
     preset = _("diagram_preset_i18n"),
     railway_lines = _("diagram_railway_lines_i18n"),
     train_list = _("diagram_train_list_i18n"),
-    search = _("diagram_search_i18n"),
+    station_search = _("diagram_station_search_i18n"),
+    settings = _("diagram_settings_i18n"),
+    settings_auto = _("diagram_settings_auto_i18n"),
+    settings_manual = _("diagram_settings_manual_i18n"),
+    settings_refresh_rate = _("diagram_settings_refresh_rate_i18n"),
+    settings_time_label = _("diagram_settings_time_label_i18n"),
+    settings_top = _("diagram_settings_top_i18n"),
+    settings_bottom = _("diagram_settings_bottom_i18n"),
+    punctuality = _("diagram_punctuality_i18n"),
+    punct_ontime = _("diagram_punct_ontime_i18n"),
+    punct_early = _("diagram_punct_early_i18n"),
+    punct_late = _("diagram_punct_late_i18n"),
 }
 
 local function getConfig()
@@ -169,9 +186,9 @@ local function loadPresetsFromTimetableObject()
                 cfg.lineColors[entry.i] = {entry.r, entry.g, entry.b, entry.a}
             end
         end
-        debugPrint("loadPresets: " .. #localPresets .. " from line " .. host .. ".dp")
+        dbgPrint("loadPresets: " .. #localPresets .. " from line " .. host .. ".dp")
     else
-        debugPrint("loadPresets: no host line with dp")
+        dbgPrint("loadPresets: no host line with dp")
     end
 end
 
@@ -180,7 +197,7 @@ local function savePresetsToTimetableObject()
     if not to then return end
     local host = getHostLineKey(to)
     if not host then
-        debugPrint("savePresets: no host line found")
+        dbgPrint("savePresets: no host line found")
         return
     end
     local dp = to[host].dp
@@ -199,7 +216,7 @@ local function savePresetsToTimetableObject()
         if p.lineData then
             for k, v in pairs(p.lineData) do ldCopy[k] = v end
         end
-        debugPrint("savePresets: preset " .. p.id .. "=" .. p.name .. " stationData entries=" .. sdCount)
+        dbgPrint("savePresets: preset " .. p.id .. "=" .. p.name .. " stationData entries=" .. sdCount)
         table.insert(dp.presetList, {id = p.id, name = p.name, stationData = sdCopy, lineData = ldCopy})
     end
     dp.activePresetId = getActivePresetId()
@@ -210,7 +227,7 @@ local function savePresetsToTimetableObject()
             table.insert(dp.colorList, {i = tostring(ld.id), r = c.x, g = c.y, b = c.z, a = c.w})
         end
     end
-    debugPrint("savePresets: saved " .. #localPresets .. " to line " .. host .. ".dp")
+    dbgPrint("savePresets: saved " .. #localPresets .. " to line " .. host .. ".dp")
 
     for k, v in pairs(to) do
         if k ~= host and type(v) == "table" and v.dp and v.dp.presetList then
@@ -240,12 +257,6 @@ end
 local function getActivePresetName()
     local p = getActivePreset()
     return p and p.name or ""
-end
-
-local function timeToSeconds(min, sec) return min * 60 + sec end
-
-local function secondsToX(seconds, width)
-    return ((seconds % 3600) / 3600) * width
 end
 
 local function stationToY(idx, total, height)
@@ -286,15 +297,14 @@ local function getAllTimetableData()
             elseif si.type == "waypoint" then wpCount = wpCount + 1 end
         end
         if stCount > 0 or wpCount > 0 then
-            debugPrint("LINE " .. tostring(lineID) .. " '" .. lineInfo.name .. "' stops=" .. #stops .. " stations=" .. stCount .. " waypoints=" .. wpCount)
+            dbgPrint("LINE " .. tostring(lineID) .. " '" .. lineInfo.name .. "' stops=" .. #stops .. " stations=" .. stCount .. " waypoints=" .. wpCount)
         end
         local savedColor = getLineColor(lineID)
         local lineData = {
             id = lineID, name = lineInfo.name, stations = {},
             color = savedColor or getColor(#data + 1),
             selected = false, bold = false, checked = true,
-        }
-        for flatIdx, stopInfo in ipairs(stops) do
+        }        for flatIdx, stopInfo in ipairs(stops) do
             local displayName = stopInfo.name
             local gk = stopInfo.gwKey
             if stopInfo.type == "waypoint" then
@@ -376,7 +386,7 @@ local function getAllStationsFlat(lineDataList)
             })
         end
     end
-    debugPrint("getAllStationsFlat: totalLines=" .. #lineDataList .. " uniqueStations=" .. totalStations .. " uniqueWaypoints=" .. totalWaypoints .. " mapOnlyAdded=" .. mapAdded)
+    dbgPrint("getAllStationsFlat: totalLines=" .. #lineDataList .. " uniqueStations=" .. totalStations .. " uniqueWaypoints=" .. totalWaypoints .. " mapOnlyAdded=" .. mapAdded)
     return list
 end
 
@@ -414,13 +424,37 @@ local function getRelevantLines(selList)
             end
         end
     end
-    -- 固定车次列表顺序：allLines 来自 pairs(lineSystem.getLines())，跨调用顺序不确定，
-    -- 不排序会导致每次刷新线路随机跳位（"勾选的线路消失"的视觉假象）。按线路 ID 稳定排序。
-    table.sort(r, function(a, b)
+    -- 车次排序：勾选置顶 + 线路名自然排序。
+    -- 1) 勾选的线路排最上面（用户需求：勾选后刷新全部上移）
+    -- 2) 线路名含"字母+数字"前缀（如 G123/G34）按 (字母, 数值) 比较 → G1,G2,G10,G21,G111
+    -- 3) 其余（含中文）按 UTF-8 码点稳定排序。中文按拼音首字母需内置数千字的拼音对照表，
+    --    TPF2 无此库，不做（这是"有难度只上移"里放弃的那部分）。
+    local function lineSortKey(name)
+        name = tostring(name or "")
+        local prefix, num = name:match("^(%a+)(%d+)")
+        if prefix and num then return {p = prefix, n = tonumber(num)} end
+        local numOnly = name:match("^(%d+)")
+        if numOnly then return {p = "", n = tonumber(numOnly)} end
+        return {s = name}
+    end
+    local function compareLines(a, b)
+        if a.checked ~= b.checked then return a.checked end
+        local ka, kb = lineSortKey(a.name), lineSortKey(b.name)
+        if ka.p and kb.p then
+            if ka.p ~= kb.p then return ka.p < kb.p end
+            if ka.n ~= kb.n then return ka.n < kb.n end
+        elseif ka.p or kb.p then
+            -- 一个有字母/数字前缀、一个没有：有前缀的排前
+            return ka.p ~= nil
+        else
+            if tostring(ka.s) ~= tostring(kb.s) then return tostring(ka.s) < tostring(kb.s) end
+        end
+        -- 同名/同 key 兜底：按线路 ID 稳定
         local na, nb = tonumber(a.id), tonumber(b.id)
         if na and nb then return na < nb end
         return tostring(a.id) < tostring(b.id)
-    end)
+    end
+    table.sort(r, compareLines)
     return r
 end
 
@@ -527,19 +561,55 @@ local function clearDiagramViews()
 end
 
 local function refreshDiagram()
-    debugPrint("refreshDiagram start")
-    if not menu.renderLayout then debugPrint("refreshDiagram: no renderLayout"); return end
+    dbgPrint("refreshDiagram start")
+    if not menu.renderLayout then dbgPrint("refreshDiagram: no renderLayout"); return end
     local selList = getSelectedStationList()
     if #selList == 0 then
         -- 勾选车站少于1个：不绘制，并清除残留的上一次运行图（含上一预设的折线/标签），
         -- 避免展开空预设后仍显示过期图形造成误导。
         clearDiagramViews()
-        debugPrint("refreshDiagram: no stations selected, cleared")
+        dbgPrint("refreshDiagram: no stations selected, cleared")
         return
     end
 
-    local dw = WINDOW_WIDTH - STATION_PANEL_WIDTH - STATION_LABEL_WIDTH
-    local dh = WINDOW_HEIGHT - TITLE_BAR_H - TIME_LABEL_HEIGHT
+    -- LineRenderView 组件逻辑尺寸（会被引擎按 UI 缩放因子放大显示），
+    -- 但 addLine 用的是组件实际渲染像素坐标（受缩放影响），故绘制坐标需乘缩放因子：
+    -- 实际像素 = 逻辑像素 × scale，scale = renderArea实际尺寸 / 逻辑尺寸。
+    local lw_logical = WINDOW_WIDTH - STATION_PANEL_WIDTH - STATION_LABEL_WIDTH
+    local lh_logical = WINDOW_HEIGHT - TITLE_BAR_H - TIME_LABEL_HEIGHT
+    local dw = lw_logical
+    local dh = lh_logical
+    local scale = 1
+    pcall(function()
+        local rr = menu.renderArea and menu.renderArea:getContentRect()
+        if rr and rr.w > 0 and rr.h > 0 then
+            scale = rr.w / lw_logical
+            dw = rr.w
+            dh = rr.h
+            -- renderArea 可能因布局偏移超出窗口右缘/下缘被裁（右侧实测超 14px）。
+            -- 计算"窗口可见右边界 - renderArea 左缘"把 dw 收缩到窗口内，保证边框/
+            -- 折线/网格最右端都画在可见区域内、右下角四线对齐。
+            -- 时间标签切到"上"时 renderArea 下移，底部也可能超出窗口下缘（下边框消失），
+            -- 用同样的方法把 dh 收缩进窗口，并额外留底部安全边距（整体上移）。
+            local winRect = menu.window and menu.window:getContentRect()
+            if winRect and winRect.w > 0 and winRect.x + winRect.w > rr.x then
+                local visW = (winRect.x + winRect.w) - rr.x - 2
+                if visW > 0 and visW < dw then dw = visW end
+            end
+            local visH = nil
+            if winRect and winRect.h > 0 and winRect.y + winRect.h > rr.y then
+                visH = (winRect.y + winRect.h) - rr.y - 2
+                if visH > 0 and visH < dh then dh = visH end
+            end
+            -- 时间标签在上方时，renderArea 下移、底部可能被窗口裁掉（下边框消失）。
+            -- 兜底：dh 再收缩一个底部安全边距（整体上移），让下边框远离组件底缘。
+            -- 时间标签在下方时保持 dh = rr.h 原样（底边框贴合组件底缘是正常状态）。
+            if timetable.getTimeLabelPos() == "top" then
+                local bottomPad = 16
+                if dh > rr.h - bottomPad then dh = rr.h - bottomPad end
+            end
+        end
+    end)
     local yMap, groups, sorts = getYMap(selList, dh)
 
     for _, v in pairs(menu.lineRenderViews) do
@@ -549,26 +619,20 @@ local function refreshDiagram()
 
     local function makeLRV()
         local v = api.gui.comp.LineRenderView.new()
-        v:setMinimumSize(api.gui.util.Size.new(dw, dh))
-        v:setMaximumSize(api.gui.util.Size.new(dw, dh))
+        v:setMinimumSize(api.gui.util.Size.new(lw_logical, lh_logical))
+        v:setMaximumSize(api.gui.util.Size.new(lw_logical, lh_logical))
         menu.renderLayout:addItem(v, 0.5, 0)
         table.insert(menu.lineRenderViews, v)
         return v
     end
 
-    local bv = makeLRV()
-    bv:setColor(api.type.Vec4f.new(1.0, 0.2, 0.2, 1.0))
-    bv:setWidth(3)
-    bv:addLine(api.type.Vec2f.new(0, 0), api.type.Vec2f.new(dw, 0))
-    bv:addLine(api.type.Vec2f.new(0, dh), api.type.Vec2f.new(dw, dh))
-    bv:addLine(api.type.Vec2f.new(0, 0), api.type.Vec2f.new(0, dh))
-    bv:addLine(api.type.Vec2f.new(dw, 0), api.type.Vec2f.new(dw, dh))
-
+    -- 边框视图 bv 最后创建（叠在最上层），否则折线的十字标记会把边框线盖住。
+    -- 创建顺序：rv(网格,最底) → 折线(中层) → bv(边框,最顶)。
     local rv = makeLRV()
     rv:setColor(api.type.Vec4f.new(0.5, 0.5, 0.5, 0.3))
     rv:setWidth(1)
     for m = 5, 55, 5 do
-        local x = secondsToX(m * 60, dw)
+        local x = (m / 60) * dw
         rv:addLine(api.type.Vec2f.new(x, 0), api.type.Vec2f.new(x, dh))
     end
     for i = 1, #sorts do
@@ -583,6 +647,9 @@ local function refreshDiagram()
         end
         menu.stationLabelViews = {}
         local labelH = 18
+        -- 顶部留白：最上面的车站 y=0，rectY 若 clamp 到 0 会贴住组件顶部、
+        -- 文字上半部分被标题栏/组件边界遮挡。整体下移留白让所有标签可见。
+        local topPad = labelH / 2
         for idx = #sorts, 1, -1 do
             local sv = sorts[idx]
             local groupStations = groups[sv]
@@ -607,7 +674,7 @@ local function refreshDiagram()
                     cont:setMaximumSize(api.gui.util.Size.new(STATION_LABEL_WIDTH, labelH))
                     cont:setLayout(api.gui.layout.BoxLayout.new("VERTICAL"))
                     cont:getLayout():addItem(label)
-                    local rectY = math.max(0, math.min(dh - labelH, math.floor(y - labelH / 2)))
+                    local rectY = math.max(topPad, math.min(dh - labelH - topPad, math.floor(y - labelH / 2 + topPad)))
                     local rect = api.gui.util.Rect.new(0, rectY, STATION_LABEL_WIDTH, labelH)
                     sll:addItem(cont, rect)
                     table.insert(menu.stationLabelViews, cont)
@@ -615,7 +682,7 @@ local function refreshDiagram()
                 if not ok2 then debugPrint("stationLabel add failed: " .. tostring(result)) end
             end
         end
-        debugPrint("stationLabels: " .. #menu.stationLabelViews .. " items, sorts=" .. #sorts)
+        dbgPrint("stationLabels: " .. #menu.stationLabelViews .. " items, sorts=" .. #sorts)
     end
 
     if menu.timeLabels and menu.timeLabels.layout and menu.timeLabels.component then
@@ -634,13 +701,22 @@ local function refreshDiagram()
                     if raRect and raRect.w > 0 and tlcRect and tlcRect.w > 0 then
                         local offsetX = raRect.x - tlcRect.x
                         local offsetY = (raRect.y + raRect.h) - tlcRect.y
-                        debugPrint("timeLabels: ra=(x=" .. raRect.x .. " y=" .. raRect.y .. " w=" .. raRect.w .. " h=" .. raRect.h .. ") tlc=(x=" .. tlcRect.x .. " y=" .. tlcRect.y .. ") offsetX=" .. offsetX .. " offsetY=" .. offsetY)
                         for m = 0, 55, 5 do
                             local fx = m / 60
                             local cx = offsetX + fx * dw
                             local label = api.gui.comp.TextView.new(string.format("%02d:00", m))
                             label:setStyleClassList({"timetable-mono-sc"})
-                            label:setGravity(0.5, 0.5)
+                            -- 时间标签在下方时：文字贴容器底部（gravity 1），从居中位置下移约半字，
+                            -- 避免紧贴运行图底边框；在上方时保持居中。
+                            -- 注意：label 必须显式占满 TIME_LABEL_HEIGHT 高，gravity 才有效——
+                            -- 否则 TextView 按文字高度自适应，gravity 形同虚设。
+                            label:setMinimumSize(api.gui.util.Size.new(labelW, TIME_LABEL_HEIGHT))
+                            label:setMaximumSize(api.gui.util.Size.new(labelW, TIME_LABEL_HEIGHT))
+                            if timetable.getTimeLabelPos() == "top" then
+                                label:setGravity(0.5, 0.5)
+                            else
+                                label:setGravity(0.5, 1)
+                            end
                             local nameTag = nextLabelName()
                             local cont = api.gui.comp.Component.new("tmCont_" .. m .. "_" .. nameTag)
                             cont:setMinimumSize(api.gui.util.Size.new(labelW, TIME_LABEL_HEIGHT))
@@ -656,7 +732,7 @@ local function refreshDiagram()
                     else
                         debugPrint("timeLabels: raRect or tlcRect invalid")
                     end
-                    debugPrint("timeLabels: " .. #menu.timeLabelViews .. " items")
+                    dbgPrint("timeLabels: " .. #menu.timeLabelViews .. " items")
                 end)
             end)
         end)
@@ -666,12 +742,12 @@ local function refreshDiagram()
     if #displayedLines > 0 then
     for _ in pairs(displayedLines) do makeLRV() end
 
-    local function drawWrappedSegment(lv, t1, y1, t2, y2, lw)
+    local function drawWrappedSegment(lv, t1, y1, t2, y2)
         local c1 = math.floor(t1 / 3600)
         local c2 = math.floor(t2 / 3600)
         if c1 == c2 then
-            local x1 = ((t1 - c1 * 3600) / 3600) * lw
-            local x2 = ((t2 - c1 * 3600) / 3600) * lw
+            local x1 = ((t1 - c1 * 3600) / 3600) * dw
+            local x2 = ((t2 - c1 * 3600) / 3600) * dw
             lv:addLine(api.type.Vec2f.new(x1, y1), api.type.Vec2f.new(x2, y2))
         else
             local total = t2 - t1
@@ -684,8 +760,8 @@ local function refreshDiagram()
                     local f2 = (e - t1) / total
                     local cy1 = y1 + f1 * (y2 - y1)
                     local cy2 = y1 + f2 * (y2 - y1)
-                    local cx1 = ((s - c * 3600) / 3600) * lw
-                    local cx2 = ((e - c * 3600) / 3600) * lw
+                    local cx1 = ((s - c * 3600) / 3600) * dw
+                    local cx2 = ((e - c * 3600) / 3600) * dw
                     lv:addLine(api.type.Vec2f.new(cx1, cy1), api.type.Vec2f.new(cx2, cy2))
                 end
             end
@@ -695,7 +771,7 @@ local function refreshDiagram()
     for li, ld in pairs(displayedLines) do
         if not ld.checked then goto continueLine end
         table.insert(drawDebug, ld.name)
-        local lv = menu.lineRenderViews[li + 2]
+        local lv = menu.lineRenderViews[li + 1]
         if lv then
             lv:setColor(ld.color)
             local lw = ld.bold and 4 or 2
@@ -791,15 +867,16 @@ local function refreshDiagram()
                 lv:setWidth(lw)
                 for _, pl in ipairs(polylines) do
                     for i = 1, #pl - 1 do
-                        drawWrappedSegment(lv, pl[i].uw, pl[i].y, pl[i+1].uw, pl[i+1].y, dw)
+                        drawWrappedSegment(lv, pl[i].uw, pl[i].y, pl[i+1].uw, pl[i+1].y)
                     end
                 end
                 lv:setWidth(lw + 2)
                 for _, pl in ipairs(polylines) do
                     for __, p in pairs(pl) do
                         local nx = ((p.uw % 3600) / 3600) * dw
-                        lv:addLine(api.type.Vec2f.new(nx - 2, p.y), api.type.Vec2f.new(nx + 2, p.y))
-                        lv:addLine(api.type.Vec2f.new(nx, p.y - 2), api.type.Vec2f.new(nx, p.y + 2))
+                        local ny = p.y
+                        lv:addLine(api.type.Vec2f.new(nx - 2, ny), api.type.Vec2f.new(nx + 2, ny))
+                        lv:addLine(api.type.Vec2f.new(nx, ny - 2), api.type.Vec2f.new(nx, ny + 2))
                     end
                 end
             end
@@ -807,7 +884,18 @@ local function refreshDiagram()
         ::continueLine::
     end
     end  -- if #displayedLines > 0
-    debugPrint("draw names: " .. table.concat(drawDebug, ", "))
+
+    -- 边框视图最后创建（叠在折线之上），避免折线的十字标记把边框线盖住。
+    -- addLine 用实际渲染像素坐标（dw/dh 已取 renderArea 实际尺寸并收缩到窗口内）
+    local bv = makeLRV()
+    bv:setColor(api.type.Vec4f.new(0.5, 0.5, 0.5, 0.3))
+    bv:setWidth(3)
+    bv:addLine(api.type.Vec2f.new(0, 0), api.type.Vec2f.new(dw, 0))
+    bv:addLine(api.type.Vec2f.new(0, dh), api.type.Vec2f.new(dw, dh))
+    bv:addLine(api.type.Vec2f.new(0, 0), api.type.Vec2f.new(0, dh))
+    bv:addLine(api.type.Vec2f.new(dw, 0), api.type.Vec2f.new(dw, dh))
+
+    dbgPrint("draw names: " .. table.concat(drawDebug, ", "))
 end
 
 local function toggleLineSelection(idx)
@@ -855,17 +943,33 @@ local function updateLineList()
     local nc = api.gui.comp.Component.new("lineList")
     local nl = api.gui.layout.BoxLayout.new("VERTICAL")
     nc:setLayout(nl)
-    debugPrint("updateLineList: " .. #displayedLines .. " lines")
+    dbgPrint("updateLineList: " .. #displayedLines .. " lines")
     local lineCount = 0
+    local totalHeight = 0
     local lineListDebug = {}
     for li, ld in pairs(displayedLines) do
         lineCount = lineCount + 1
         table.insert(lineListDebug, ld.name)
+        -- 先统计该线路的准点车辆数，决定行高（准点文本并入线路行内，色块右侧垂直排列）
+        local punctRowCount = 0
+        local punctData0 = _G._punctuality
+        if punctData0 then
+            for _, pv in pairs(punctData0) do
+                if pv and pv.lineId and tostring(pv.lineId) == tostring(ld.id) then
+                    punctRowCount = punctRowCount + 1
+                end
+            end
+        end
+        local rowH = math.max(42, punctRowCount * 24)
+        totalHeight = totalHeight + rowH
         local ic = api.gui.comp.Component.new("lineItem_" .. li)
         local il = api.gui.layout.BoxLayout.new("HORIZONTAL")
         ic:setLayout(il)
-        ic:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 42))
-        ic:setMaximumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 42))
+        -- 行宽最小 220（与左栏一致），最大放宽：线路名过长时行自然变宽，
+        -- 靠 ScrollArea 横向滚动条把被顶出去的准点信息滚回来（见 showDiagram 中
+        -- lineScrollArea 的 setHorizontalScrollBarPolicy）。
+        ic:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, rowH))
+        ic:setMaximumSize(api.gui.util.Size.new(600, rowH))
 
         local ckImg = api.gui.comp.ImageView.new(ld.checked and "ui/checkbox1.tga" or "ui/checkbox0.tga")
         local ckBtn = api.gui.comp.Button.new(ckImg, true)
@@ -908,10 +1012,68 @@ local function updateLineList()
         end
         dotLayout:addItem(dotLrv, 0.5, 0.5)
         il:addItem(dotCont)
+
+        -- 准点信息：圆点（●）与文字合并为一个 TextView（"●正点"），颜色同为准点样式色
+        -- （正点白/早点绿/晚点红）。不设固定宽度：TextView 按实际渲染宽度自适应，
+        -- pvCont 随之自适应——避免估宽不准导致文字被裁（"跑后面被遮住"）。
+        -- 若整行（勾选框+线路名+色块+准点）超出 220，行自然变宽，由横向滚动条带回。
+        local pvCont = api.gui.comp.Component.new("pvCont_" .. li)
+        local pvl = api.gui.layout.BoxLayout.new("VERTICAL")
+        pvCont:setLayout(pvl)
+        pvCont:setMinimumSize(api.gui.util.Size.new(0, rowH))
+        pvCont:setMaximumSize(api.gui.util.Size.new(600, rowH))
+        if punctRowCount > 0 then
+            local punctData = _G._punctuality
+            for vId, pv in pairs(punctData) do
+                if pv and pv.lineId and tostring(pv.lineId) == tostring(ld.id) then
+                    local text = D.punct_ontime
+                    local punctClass = "timetable-punct-ontime"
+                    local diff = nil
+                    -- 判定（中国铁路逻辑，两段式）：
+                    --   [发车前] 以"停车到站"事件判定到达：早到/正点/晚点都显示，直到发车；
+                    --   [发车后] 以"发车"事件修正为准：晚发→晚点，正点发→正点，早发→早点。
+                    -- 晚点到站但正点发车 = 追回晚点，发车后应显示"正点"（不能按到达晚点掩盖）。
+                    if pv.arrDone then
+                        if pv.depPunct == "late" then
+                            diff = pv.depDiff
+                        elseif pv.depPunct == "early" then
+                            diff = pv.depDiff
+                        end
+                    else
+                        if pv.arrPunct == "early" then
+                            diff = pv.arrDiff  -- 负值（早到）
+                        elseif pv.arrPunct == "late" then
+                            diff = pv.arrDiff  -- 正值（晚到）
+                        end
+                    end
+                    if diff then
+                        local secs = math.abs(math.floor(diff))
+                        local mm = math.floor(secs / 60)
+                        local ss = secs % 60
+                        local tmStr = string.format("%02d:%02d", mm, ss)
+                        if diff > 0 then
+                            text = string.format(D.punct_late, tmStr)
+                            punctClass = "timetable-punct-late"
+                        else
+                            text = string.format(D.punct_early, tmStr)
+                            punctClass = "timetable-punct-early"
+                        end
+                    end
+                    -- 圆点（●）与准点文本合并为"●正点"一体；颜色由样式类决定
+                    local ptv = api.gui.comp.TextView.new("●" .. text)
+                    ptv:setStyleClassList({"timetable-mono-sc", punctClass})
+                    ptv:setMinimumSize(api.gui.util.Size.new(0, 24))
+                    ptv:setMaximumSize(api.gui.util.Size.new(600, 24))
+                    ptv:setGravity(0, 0.5)
+                    pvl:addItem(ptv)
+                end
+            end
+            il:addItem(pvCont)
+        end
         nl:addItem(ic)
     end
-    debugPrint("lineList names: " .. table.concat(lineListDebug, ", "))
-    nc:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, lineCount * 44))
+    dbgPrint("lineList names: " .. table.concat(lineListDebug, ", "))
+    nc:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, totalHeight))
     menu.lineScrollArea:setContent(nc)
     menu.lineListLayout = nl; menu.lineListComponent = nc
     -- 恢复刷新前的滚动位置，避免车次列表回到最上面（影响用户继续改动）
@@ -943,7 +1105,7 @@ saveCurrentPreset = function()
     -- 只允许保存当前展开的预设；不落入 getActivePreset() 回退，
     -- 避免在 allStations 为未加载默认状态时把空配置写回（数据丢失）。
     local p = currentPresetRef
-    if not p then debugPrint("saveCurrentPreset: no current preset, skip"); return end
+    if not p then dbgPrint("saveCurrentPreset: no current preset, skip"); return end
     local sd = {}
     local asCount = 0
     local selCount = 0
@@ -953,7 +1115,7 @@ saveCurrentPreset = function()
         sd[key] = {selected = st.selected or false, sort = (type(st.sort) == "number" and st.sort > 0 and st.sort <= 255) and st.sort or 256}
         if st.selected then selCount = selCount + 1 end
     end
-    debugPrint("saveCurrentPreset: allStations=" .. asCount .. " selected=" .. selCount .. " sd type=" .. type(sd))
+    dbgPrint("saveCurrentPreset: allStations=" .. asCount .. " selected=" .. selCount .. " sd type=" .. type(sd))
     p.stationData = sd
 
     local ld = {}
@@ -969,7 +1131,7 @@ saveCurrentPreset = function()
         end
     end
     p.lineData = ld
-    debugPrint("saveCurrentPreset: lineData entries=" .. ldCount)
+    dbgPrint("saveCurrentPreset: lineData entries=" .. ldCount)
 end
 
 local function saveAllLineColors()
@@ -1007,7 +1169,7 @@ rebuildPresetList = function()
     local nl = api.gui.layout.BoxLayout.new("VERTICAL")
     nc:setLayout(nl)
     stationRowGroups = {}
-    debugPrint("rebuildPresetList: " .. #localPresets .. " presets, expanded=" .. tostring(expandedPresetId) .. " allStations=" .. #allStations)
+    dbgPrint("rebuildPresetList: " .. #localPresets .. " presets, expanded=" .. tostring(expandedPresetId) .. " allStations=" .. #allStations)
 
     if #localPresets == 0 then
         local lbl = api.gui.comp.TextView.new(D.no_presets)
@@ -1092,19 +1254,24 @@ rebuildPresetList = function()
             cw2:setPosition(400, 300)
             local ok2 = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.confirm), true)
             ok2:onClick(function()
-                pcall(function() cw2:setVisible(false, false) end)
-                for i, p in ipairs(localPresets) do if p.id == targetId then table.remove(localPresets, i); break end end
-                if expandedPresetId == targetId then
-                    expandedPresetId = nil
-                    currentPresetRef = nil
-                    -- 删除正在展开的预设：清空车次列表与运行图，避免残留已删除预设的图形
-                    displayedLines = {}
-                    updateLineList()
-                    clearDiagramViews()
-                end
-                if #localPresets == 0 then setActivePresetId(""); currentPresetRef = nil end
-                savePresetsToTimetableObject()
-                rebuildPresetList()
+                -- 删除确认回调整体包 pcall：玩家反馈删除铁路线配置时偶发 Lua exception 崩溃
+                -- （如 attempt to index nil）。pcall 捕获后可记录具体错误、阻止崩溃传播。
+                local okDel, delErr = pcall(function()
+                    pcall(function() cw2:setVisible(false, false) end)
+                    for i, p in ipairs(localPresets) do if p.id == targetId then table.remove(localPresets, i); break end end
+                    if expandedPresetId == targetId then
+                        expandedPresetId = nil
+                        currentPresetRef = nil
+                        -- 删除正在展开的预设：清空车次列表与运行图，避免残留已删除预设的图形
+                        displayedLines = {}
+                        updateLineList()
+                        clearDiagramViews()
+                    end
+                    if #localPresets == 0 then setActivePresetId(""); currentPresetRef = nil end
+                    savePresetsToTimetableObject()
+                    rebuildPresetList()
+                end)
+                if not okDel then debugPrint("deletePreset ERROR: " .. tostring(delErr)) end
             end)
             local cancel2 = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.cancel), true)
             cancel2:onClick(function() pcall(function() cw2:setVisible(false, false) end) end)
@@ -1206,15 +1373,19 @@ local function addNewPreset()
 end
 
 local function persistConfig()
-    if currentPresetRef then saveCurrentPreset() end
-    savePresetsToTimetableObject()
-    saveAllLineColors()
-    local pc = #localPresets
-    local ac = 0
-    if currentPresetRef and currentPresetRef.stationData then
-        for _ in pairs(currentPresetRef.stationData) do ac = ac + 1 end
-    end
-    debugPrint("persistConfig: " .. pc .. " presets, current has " .. ac .. " station data entries")
+    -- onClose 兜底保存：整体包 pcall，避免删除预设后关窗时 Lua 错误传播导致崩溃
+    local ok, err = pcall(function()
+        if currentPresetRef then saveCurrentPreset() end
+        savePresetsToTimetableObject()
+        saveAllLineColors()
+        local pc = #localPresets
+        local ac = 0
+        if currentPresetRef and currentPresetRef.stationData then
+            for _ in pairs(currentPresetRef.stationData) do ac = ac + 1 end
+        end
+        debugPrint("persistConfig: " .. pc .. " presets, current has " .. ac .. " station data entries")
+    end)
+    if not ok then debugPrint("persistConfig ERROR: " .. tostring(err)) end
 end
 
 local function doRefreshData()
@@ -1256,6 +1427,43 @@ local function doRefreshData()
         pcall(function() refreshDiagram() end)
     end
     rebuildPresetList()
+end
+
+-- 应用"时间标签位置"设置：把图表区（ca，含站名标签+运行图）与时间标签条（tlc）
+-- 在 da 的 FloatingLayout 里切换对齐位置。
+--   bottom（默认）：ca 对齐顶部(0.5,0)，tlc 对齐底部(0.5,1) → 时间标签在下方
+--   top：tlc 对齐顶部(0.5,0)，ca 对齐底部(0.5,1) → 时间标签在上方，图表区下移腾位
+-- 用 removeItem + 重新 addItem(comp, alignX, alignY) 切换——addItem 是 renderLayout
+-- 一直使用的形态（FloatingLayout 按对齐值放置子项，AGENTS.md 已验证）。setAlignment
+-- 的索引在引擎里取不到可靠值（getItem:getId 无法匹配），故改用重建加入。
+local function applyTimeLabelPosition()
+    local pos = timetable.getTimeLabelPos()
+    if pos ~= "top" then pos = "bottom" end
+    local dal = menu.daLayout
+    local ca = menu.chartArea
+    local tlc = menu.timeLabels and menu.timeLabels.component
+    if not dal or not ca or not tlc then
+        dbgPrint("applyTimeLabelPosition: missing layout refs, skip")
+        return
+    end
+    -- 已处于目标布局时跳过（幂等）
+    if menu.appliedTimeLabelPos == pos then
+        dbgPrint("applyTimeLabelPosition: already " .. pos .. ", skip")
+        return
+    end
+    -- 移除旧的 ca/tlc，再按目标顺序/对齐重新加入。
+    -- removeItem 属于 ILayout 基类（AGENTS.md），FloatingLayout 可用；pcall 保护。
+    pcall(function() dal:removeItem(ca) end)
+    pcall(function() dal:removeItem(tlc) end)
+    if pos == "top" then
+        pcall(function() dal:addItem(tlc, 0.5, 0) end)  -- tlc 顶部
+        pcall(function() dal:addItem(ca, 0.5, 1) end)   -- ca 底部（图表下移腾位）
+    else
+        pcall(function() dal:addItem(ca, 0.5, 0) end)   -- ca 顶部
+        pcall(function() dal:addItem(tlc, 0.5, 1) end)  -- tlc 底部
+    end
+    menu.appliedTimeLabelPos = pos
+    dbgPrint("applyTimeLabelPosition: pos=" .. pos)
 end
 
 function diagramGUI.showDiagram()
@@ -1305,11 +1513,11 @@ function diagramGUI.showDiagram()
     allLines = lineDataList
     displayedLines = {}
 
-    debugPrint("Window open: " .. #localPresets .. " presets, activeId='" .. getActivePresetId() .. "'")
+    dbgPrint("Window open: " .. #localPresets .. " presets, activeId='" .. getActivePresetId() .. "'")
     for _, lp in pairs(localPresets) do
         local sc = 0
         if lp.stationData then for _ in pairs(lp.stationData) do sc = sc + 1 end end
-        debugPrint("  preset " .. lp.id .. "='" .. lp.name .. "' stationData=" .. sc)
+        dbgPrint("  preset " .. lp.id .. "='" .. lp.name .. "' stationData=" .. sc)
     end
 
     expandedPresetId = nil
@@ -1328,6 +1536,133 @@ function diagramGUI.showDiagram()
     leftPanel:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H))
     leftPanel:setMaximumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H))
 
+    -- 设置按钮行：位于左面板顶部（"铁路线"标题上方），打开刷新模式设置弹窗
+    local settingsBar = api.gui.comp.Component.new("settingsBar")
+    local sbl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+    settingsBar:setLayout(sbl)
+    local setBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.settings), true)
+    setBtn:onClick(function()
+        local okSetting, settingErr = pcall(function()
+            -- 设置弹窗：
+            -- 分区1 "刷新频率"：勾选 10s 自动刷新 或 手动刷新（互斥）
+            -- 分区2 "时间标签位置"：上 / 下（互斥，默认下）
+            -- 点"确定"应用设置并刷新运行图（时间标签位置改变会重新排布图表并重绘）。
+            local cc = api.gui.comp.Component.new("settingsContent")
+            local cl = api.gui.layout.BoxLayout.new("VERTICAL")
+            cc:setLayout(cl)
+            cc:setMinimumSize(api.gui.util.Size.new(300, 240))
+            cc:setMaximumSize(api.gui.util.Size.new(300, 240))
+
+            local curAuto = _G._diagramAutoRefresh
+            if curAuto == nil then curAuto = false end
+            local curPos = timetable.getTimeLabelPos()
+            if curPos == nil or (curPos ~= "top" and curPos ~= "bottom") then curPos = "bottom" end
+            -- 待应用值：点"确定"才写入（用户要求"点击确定更改设置并刷新"）
+            local selAuto = curAuto
+            local selPos = curPos
+
+            local function makeSectionLabel(text)
+                local lbl = api.gui.comp.TextView.new(text)
+                lbl:setStyleClassList({"timetable-settings-header"})
+                return lbl
+            end
+
+            -- 分区1：刷新频率
+            cl:addItem(makeSectionLabel(D.settings_refresh_rate))
+
+            local autoCk = api.gui.comp.ImageView.new(curAuto and "ui/checkbox1.tga" or "ui/checkbox0.tga")
+            local autoBtn = api.gui.comp.Button.new(autoCk, true)
+            local autoLbl = api.gui.comp.TextView.new(D.settings_auto)
+            local autoRow = api.gui.comp.Component.new("settingRowAuto")
+            local autoRl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+            autoRow:setLayout(autoRl)
+            autoRl:addItem(autoBtn); autoRl:addItem(autoLbl)
+
+            local manCk = api.gui.comp.ImageView.new((not curAuto) and "ui/checkbox1.tga" or "ui/checkbox0.tga")
+            local manBtn = api.gui.comp.Button.new(manCk, true)
+            local manLbl = api.gui.comp.TextView.new(D.settings_manual)
+            local manRow = api.gui.comp.Component.new("settingRowMan")
+            local manRl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+            manRow:setLayout(manRl)
+            manRl:addItem(manBtn); manRl:addItem(manLbl)
+
+            cl:addItem(autoRow); cl:addItem(manRow)
+
+            -- 分区2：时间标签位置
+            cl:addItem(makeSectionLabel(D.settings_time_label))
+
+            local topCk = api.gui.comp.ImageView.new(curPos == "top" and "ui/checkbox1.tga" or "ui/checkbox0.tga")
+            local topBtn = api.gui.comp.Button.new(topCk, true)
+            local topLbl = api.gui.comp.TextView.new(D.settings_top)
+            local topRow = api.gui.comp.Component.new("settingRowTop")
+            local topRl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+            topRow:setLayout(topRl)
+            topRl:addItem(topBtn); topRl:addItem(topLbl)
+
+            local botCk = api.gui.comp.ImageView.new(curPos == "bottom" and "ui/checkbox1.tga" or "ui/checkbox0.tga")
+            local botBtn = api.gui.comp.Button.new(botCk, true)
+            local botLbl = api.gui.comp.TextView.new(D.settings_bottom)
+            local botRow = api.gui.comp.Component.new("settingRowBottom")
+            local botRl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+            botRow:setLayout(botRl)
+            botRl:addItem(botBtn); botRl:addItem(botLbl)
+
+            cl:addItem(topRow); cl:addItem(botRow)
+
+            local btnRow = api.gui.comp.Component.new("settingBtns")
+            local btnRl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+            btnRow:setLayout(btnRl)
+            local okBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.confirm), true)
+            local cancelBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.cancel), true)
+            btnRl:addItem(okBtn); btnRl:addItem(cancelBtn); cl:addItem(btnRow)
+
+            local okW, w = pcall(function() return api.gui.comp.Window.new(D.settings, cc) end)
+            if not okW or not w then return end
+            w:addHideOnCloseHandler()
+            w:setMovable(true)
+            w:setSize(api.gui.util.Size.new(320, 280))
+            w:setPosition(400, 300)
+
+            autoBtn:onClick(function()
+                selAuto = true
+                pcall(function() autoCk:setImage("ui/checkbox1.tga", false) end)
+                pcall(function() manCk:setImage("ui/checkbox0.tga", false) end)
+            end)
+            manBtn:onClick(function()
+                selAuto = false
+                pcall(function() autoCk:setImage("ui/checkbox0.tga", false) end)
+                pcall(function() manCk:setImage("ui/checkbox1.tga", false) end)
+            end)
+            topBtn:onClick(function()
+                selPos = "top"
+                pcall(function() topCk:setImage("ui/checkbox1.tga", false) end)
+                pcall(function() botCk:setImage("ui/checkbox0.tga", false) end)
+            end)
+            botBtn:onClick(function()
+                selPos = "bottom"
+                pcall(function() topCk:setImage("ui/checkbox0.tga", false) end)
+                pcall(function() botCk:setImage("ui/checkbox1.tga", false) end)
+            end)
+            okBtn:onClick(function()
+                pcall(function() w:setVisible(false, false) end)
+                -- 点"确定"才应用设置并刷新运行图：
+                -- 1) 刷新频率（10s 自动刷新 / 手动刷新）
+                -- 2) 时间标签位置（重排图表区 + 重绘时间标签）
+                local okApply, applyErr = pcall(function()
+                    _G._diagramAutoRefresh = selAuto
+                    timetable.setTimeLabelPos(selPos)
+                    applyTimeLabelPosition()
+                    doRefreshData()
+                end)
+                if not okApply then debugPrint("settings apply ERROR: " .. tostring(applyErr)) end
+            end)
+            cancelBtn:onClick(function() pcall(function() w:setVisible(false, false) end) end)
+        end)
+        if not okSetting then debugPrint("settings window ERROR: " .. tostring(settingErr)) end
+    end)
+    sbl:addItem(setBtn)
+    leftLayout:addItem(settingsBar)
+
     local phc = api.gui.comp.Component.new("presetHeader")
     local phl = api.gui.layout.BoxLayout.new("HORIZONTAL")
     phc:setLayout(phl)
@@ -1336,9 +1671,17 @@ function diagramGUI.showDiagram()
     addBtn:onClick(function() addNewPreset() end)
     phl:addItem(addBtn)
 
-    phl:addItem(api.gui.comp.TextView.new(D.search))
-
     leftLayout:addItem(phc)
+
+    -- 搜索行：独立一行（"车站搜索"标题 + 输入框）。
+    -- 旧布局把"搜索"标题塞进"铁路线"标题行，英文单词过长把输入框挤出左栏被遮挡；
+    -- 拆成单独一行后输入框有完整宽度可用。
+    local shc = api.gui.comp.Component.new("searchHeader")
+    local shl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+    shc:setLayout(shl)
+    shl:addItem(api.gui.comp.TextView.new(D.station_search))
+
+    leftLayout:addItem(shc)
 
     local psa = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new("presetScroll"), "diagram.presetScroll")
     psa:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 270))
@@ -1412,6 +1755,11 @@ function diagramGUI.showDiagram()
         if okW and w then w:addHideOnCloseHandler(); w:setMovable(true); w:setPosition(300, 200) end
     end)
     lhl:addItem(lineColorBtn)
+
+    -- 准点信息标题：比"车次列表"小一号字号（timetable-mono-sc 为 10px），位于颜色按钮右侧
+    local punctTv = api.gui.comp.TextView.new(D.punctuality)
+    punctTv:setStyleClassList({"timetable-mono-sc"})
+    lhl:addItem(punctTv)
     lsl:addItem(lhc)
 
     local lsa = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new("lineScroll"), "diagram.lineScroll")
@@ -1422,21 +1770,41 @@ function diagramGUI.showDiagram()
     lsa:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 270))
     lsa:setMaximumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 270))
     menu.lineScrollArea = lsa
+    -- 允许横向滚动：线路名过长把准点信息顶出后，可横向滚动查看。
+    -- ScrollBarPolicy 枚举未在官方 API 文档中列出（只提到 setHorizontalScrollBarPolicy），
+    -- 故 best-effort：枚举路径取不到就跳过，依赖 ScrollArea 默认行为。
+    pcall(function()
+        local policy = nil
+        pcall(function()
+            local e = api.type and api.type.enum and api.type.enum.ScrollBarPolicy
+            if e then policy = e.ScrollBarAsNeeded end
+        end)
+        if policy then
+            pcall(function() lsa:setHorizontalScrollBarPolicy(policy) end)
+        end
+    end)
     lsl:addItem(lsa)
     leftLayout:addItem(lsc)
     mainLayout:addItem(leftPanel)
 
     local da = api.gui.comp.Component.new("diagramArea")
-    local dl2 = api.gui.layout.BoxLayout.new("VERTICAL")
-    da:setLayout(dl2)
+    -- 用 FloatingLayout 承载 ca(图表区)/tlc(时间标签条)：子项按相对父容器的对齐位置放置
+    -- （0=左/上, 0.5=中, 1=右/下），可通过 setAlignment(index, x, y) 运行时切换。
+    -- 说明：BoxLayout 的 removeItem+addItem 动态重排实测不生效；AbsoluteLayout 的
+    -- Rect 坐标语义与 LineRenderView 不一致（实测把 ca 放错位置）。FloatingLayout
+    -- 与 renderLayout 同款，对齐行为可靠。
+    local dal = api.gui.layout.FloatingLayout.new(0, 1)
+    da:setLayout(dal)
     da:setMinimumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H))
     da:setMaximumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H))
+    menu.daLayout = dal
 
     local ca = api.gui.comp.Component.new("chartArea")
     local cl2 = api.gui.layout.BoxLayout.new("HORIZONTAL")
     ca:setLayout(cl2)
     ca:setMinimumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H - TIME_LABEL_HEIGHT))
     ca:setMaximumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H - TIME_LABEL_HEIGHT))
+    menu.chartArea = ca
     local slc = api.gui.comp.Component.new("stationLabels")
     local sll = api.gui.layout.AbsoluteLayout.new()
     slc:setLayout(sll)
@@ -1462,15 +1830,18 @@ function diagramGUI.showDiagram()
         table.insert(menu.lineRenderViews, v)
     end
     mkiv(); mkiv()
-    cl2:addItem(ra); dl2:addItem(ca)
+    cl2:addItem(ra)
+    -- 默认时间标签在底部：ca(图表) 对齐顶部(0.5,0)，tlc(时间标签) 对齐底部(0.5,1)。
+    -- FloatingLayout 对齐值：alignX 0=左/0.5=中/1=右，alignY 0=顶/0.5=中/1=底。
+    dal:addItem(ca, 0.5, 0)
 
     local tlc = api.gui.comp.Component.new("timeLabels")
     local tll = api.gui.layout.AbsoluteLayout.new()
     tlc:setLayout(tll)
     tlc:setMinimumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, TIME_LABEL_HEIGHT))
     tlc:setMaximumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, TIME_LABEL_HEIGHT))
-    menu.timeLabels = {layout = tll, component = tlc, parentLayout = dl2}
-    dl2:addItem(tlc); mainLayout:addItem(da)
+    menu.timeLabels = {layout = tll, component = tlc, parentLayout = dal}
+    dal:addItem(tlc, 0.5, 1); mainLayout:addItem(da)
 
     local wrapper = api.gui.comp.Component.new("diagramWrapper")
     wrapper:setLayout(mainLayout)
@@ -1480,6 +1851,16 @@ function diagramGUI.showDiagram()
     local okW2, newWin = pcall(function() return api.gui.comp.Window.new(D.title, wrapper) end)
     if not okW2 or not newWin then debugPrint("Window.new failed"); return end
     menu.window = newWin
+    -- 应用已保存的时间标签位置：FloatingLayout 默认 ca 对齐顶、tlc 对齐底（时间标签在下）。
+    -- 若玩家上次选了"上"，这里用 setAlignment 把 tlc 移到顶部、ca 移到底部腾出空间。
+    pcall(function()
+        if timetable.getTimeLabelPos() == "top" then
+            menu.appliedTimeLabelPos = "bottom"  -- 强制重排为 top
+            applyTimeLabelPosition()
+        else
+            menu.appliedTimeLabelPos = "bottom"
+        end
+    end)
     menu.window:invokeLater(function()
         pcall(function()
             if _G._timetableWindow and ttWasVisible then
@@ -1491,6 +1872,19 @@ function diagramGUI.showDiagram()
     menu.window:setMovable(true); menu.window:setResizable(true)
     menu.window:setSize(api.gui.util.Size.new(WINDOW_WIDTH, WINDOW_HEIGHT))
     menu.window:setPosition(200, 100)
+    -- 自动刷新：勾选"10s 自动刷新"时，每 10s 执行一次完整刷新（与"刷新"按钮等同：
+    -- 重新读取时刻表数据 + 重建车次列表含准点 + 重绘运行图）。
+    menu.window:onStep(function()
+        pcall(function()
+            if not _G._diagramAutoRefresh then return end
+            local t = timetableHelper.getTime()
+            if not _G._punctLastRefresh then _G._punctLastRefresh = t end
+            if t - _G._punctLastRefresh >= 10 then
+                _G._punctLastRefresh = t
+                doRefreshData()
+            end
+        end)
+    end)
     menu.window:invokeLater(function()
         local okSF, ff = pcall(function()
             local f = api.gui.comp.TextInputField.new("")
@@ -1502,8 +1896,7 @@ function diagramGUI.showDiagram()
             return f
         end)
         if okSF and ff then
-            phl:addItem(ff)
-            debugPrint("filterField OK (deferred)")
+            shl:addItem(ff)
         else
             debugPrint("filterField FAIL deferred: " .. tostring(ff))
         end
@@ -1514,6 +1907,7 @@ function diagramGUI.showDiagram()
         menu.stationLabelViews = {}; menu.timeLabelViews = {}
         menu.timeLabels = {}; menu.lineListLayout = nil; menu.lineListComponent = nil
         menu.renderLayout = nil; menu.renderArea = nil
+        menu.daLayout = nil; menu.chartArea = nil; menu.appliedTimeLabelPos = nil
         menu.lineScrollArea = nil; menu.presetScrollArea = nil
         stationRowGroups = {}; displayedLines = {}
     end)

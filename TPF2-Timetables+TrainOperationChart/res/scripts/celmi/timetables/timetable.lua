@@ -338,59 +338,85 @@ function timetable.waitingRequired(vehicle)
     if not timetableObject[currentLineString].stations[currentStop].conditions then return false end
     if not timetableObject[currentLineString].stations[currentStop].conditions.type then return false end
 
-    if timetableHelper.getTimeUntilDeparture(vehicle) >= 5 then return false end
-
     if not currentlyWaiting[currentLineString] then currentlyWaiting[currentLineString] = {stations = {}} end
     if not currentlyWaiting[currentLineString].stations[currentStop] then
-          currentlyWaiting[currentLineString].stations[currentStop] = { currentlyWaiting = {}}
+          currentlyWaiting[currentLineString].stations[currentStop] = { currentlyWaiting = {}, outboundTime = {} }
     end
+    local stopData = currentlyWaiting[currentLineString].stations[currentStop]
+
+    -- 门控（仅对"未被扣车"的车辆生效）：关门倒计时 >=5s 时不干预，保留"到站后引擎默认
+    -- 停靠流程内先不干预"的保守行为。已被扣车的车辆必须跳过此门控——否则引擎在扣车状态下
+    -- 把关门计时重置/保持为 >=5 时，本函数会错误返回 false → startVehicle 释放扣车 →
+    -- 列车"停一下车立马就发车"，不再等到时刻表发车时刻。
+    if stopData.currentlyWaiting[vehicle] == nil
+       and timetableHelper.getTimeUntilDeparture(vehicle) >= 5 then
+        return false
+    end
+
     if timetableObject[currentLineString].stations[currentStop].conditions.type == "ArrDep" then
-        -- am I currently waiting or just arrived?
+        local constraints = timetableObject[currentLineString].stations[currentStop].conditions.ArrDep
+        if not constraints or #constraints == 0 then
+            stopData.currentlyWaiting = {}
+            return false
+        end
 
-        if not (currentlyWaiting[currentLineString].stations[currentStop].currentlyWaiting[vehicle]) then
-            -- check if is about to depart
+        -- 发车后 40s 内不干预（防止发车判定滞后导致再次被扣）。
+        -- outboundTime 必须按车辆分别记录：若整站共享一个时间戳，同站先被放行的晚点车
+        -- 会在 40s 内把其它应该等待到发车时刻的车也一起放行 → 另一辆车"停一下车立马就发车"。
+        local ob = stopData.outboundTime and stopData.outboundTime[vehicle]
+        if ob and (ob + 40) > time then
+            return false
+        end
 
-            if currentlyWaiting[currentLineString].stations[currentStop].outboundTime
-               and (currentlyWaiting[currentLineString].stations[currentStop].outboundTime + 40) > time then
-                return false
-            end
+        -- 晚点判定标准（秒）：0 = 无（无论晚点多久都立即放行发车）
+        local tolerance = timetable.getDelayTolerance()
 
-            -- just arrived
-            local nextConstraint = timetable.getNextConstraint(timetableObject[currentLineString].stations[currentStop].conditions.ArrDep, time)
-            if not nextConstraint then
-                -- no constraints set
-                currentlyWaiting[currentLineString].stations[currentStop].currentlyWaiting = {}
-                return false
-            end
-            if timetable.beforeDepature(nextConstraint, time, timetableObject[currentLineString].stations[currentStop].conditions.ArrDep) then
-                -- Constraint set and I need to wait
-                currentlyWaiting[currentLineString].stations[currentStop].currentlyWaiting[vehicle] = {
-                    type = "ArrDep",
-                    arrivalTime = time,
-                    constraint = nextConstraint
-                }
-
-                return true
+        -- 逐槽位计算：周期取"到达时刻离当前时刻最近"的那一趟（早到时取下一趟，
+        -- 避免把早到误判成对上一趟晚点）。统计：
+        --   nextDep       = 下一趟发车时刻（绝对秒，未错过槽位的发车）
+        --   smallestDelay = 距最近一趟"已错过"发车的晚点秒数
+        local nextDep = nil
+        local smallestDelay = nil
+        for _, c in ipairs(constraints) do
+            local arrTime = (c[1] * 60 + c[2]) % 3600
+            local depTime = (c[3] * 60 + c[4]) % 3600
+            local k = math.floor((time - arrTime + 1800) / 3600)
+            local absArr = arrTime + 3600 * k
+            local absDep = depTime + 3600 * k
+            if absDep < absArr then absDep = absDep + 3600 end
+            if time < absDep then
+                -- 未到该槽位发车（早到/正点）→ 作为等待候选
+                if not nextDep or absDep < nextDep then nextDep = absDep end
             else
-                -- Constraint set and its time to depart
-                currentlyWaiting[currentLineString].stations[currentStop].outboundTime = time
-                currentlyWaiting[currentLineString].stations[currentStop].currentlyWaiting = {}
-                return false
-            end
-        else
-            -- already waiting
-            local arivalTime = currentlyWaiting[currentLineString].stations[currentStop].currentlyWaiting[vehicle].arrivalTime
-            local constraint = timetable.getNextConstraint(timetableObject[currentLineString].stations[currentStop].conditions.ArrDep, arivalTime)
-            if timetable.beforeDepature(constraint, time, timetableObject[currentLineString].stations[currentStop].conditions.ArrDep) then
-                -- need to continue waiting
-                return true
-            else
-                -- done waiting
-                currentlyWaiting[currentLineString].stations[currentStop].outboundTime = time
-                currentlyWaiting[currentLineString].stations[currentStop].currentlyWaiting = {}
-                return false
+                -- 已过该槽位发车（晚点）→ 记录晚点秒数
+                local delay = time - absDep
+                if not smallestDelay or delay < smallestDelay then smallestDelay = delay end
             end
         end
+
+        local wasWaiting = stopData.currentlyWaiting[vehicle] ~= nil
+
+        if smallestDelay then
+            -- 已错过某趟发车（晚点）
+            if tolerance > 0 and smallestDelay > tolerance then
+                -- 晚点超过判定标准：扣车到下一趟/下一周期
+                stopData.currentlyWaiting[vehicle] = { type = "ArrDep", arrivalTime = time }
+                return true
+            end
+            -- 未设判定标准（无）或晚点在容差内：立即放行发车（晚点1秒也不再被扣）
+            stopData.currentlyWaiting[vehicle] = nil
+            stopData.outboundTime[vehicle] = time
+            if wasWaiting then timetableHelper.forceDeparture(vehicle) end
+            return false
+        end
+
+        -- 未错过任何槽位（早到/正点）：等待下一趟发车
+        if nextDep then
+            stopData.currentlyWaiting[vehicle] = { type = "ArrDep", arrivalTime = time }
+            return true
+        end
+        stopData.currentlyWaiting[vehicle] = nil
+        return false
 
 
     --------------------------------------------------------------------------------------------------------------------
@@ -412,6 +438,52 @@ function timetable.waitingRequired(vehicle)
         currentlyWaiting[currentLineString].stations[currentStop].currentlyWaiting = {}
         return false
     end
+end
+
+-- 车辆当前是否处于"被扣车等待"状态（供 timetableCoroutine 检测 等待→放行 瞬间，
+-- 以便在真正发车时刻调用 setVehicleShouldDepart 强制启动车辆）
+function timetable.isVehicleWaiting(vehicle)
+    local currentLine = timetableHelper.getCurrentLine(vehicle)
+    local currentStop = timetableHelper.getCurrentStation(vehicle)
+    local lineStr = tostring(currentLine)
+    local s = currentlyWaiting[lineStr]
+    if not s or not s.stations then return false end
+    local st = s.stations[currentStop]
+    if not st or not st.currentlyWaiting then return false end
+    return st.currentlyWaiting[vehicle] ~= nil
+end
+
+-- 晚点判定标准（秒）。0 = 无（无论晚点多久都立即放行发车）。
+-- 存 timetableObject._delayTolerance（随 state.timetable 持久化，跨关窗/重进保留；
+-- 且经 sendScriptEvent 从 GUI 线程同步到引擎线程，waitingRequired 在引擎线程读取）。
+function timetable.getDelayTolerance()
+    -- 先读 _G 缓存（模块重载后仍存活），再读 timetableObject（跨线程同步后的权威值）
+    if type(_G._delayTolerance) == "number" then return _G._delayTolerance end
+    local v = timetableObject._delayTolerance
+    if type(v) ~= "number" then return 0 end
+    return v
+end
+
+function timetable.setDelayTolerance(v)
+    if type(v) ~= "number" or v < 0 then v = 0 end
+    timetableObject._delayTolerance = v
+    _G._delayTolerance = v
+end
+
+-- 时间标签位置（运行图窗口）："top" 时间标签在上方 / "bottom" 在下方。默认 "bottom"。
+-- 与晚点容差同样持久化：存 timetableObject（随 state.timetable 存档）+ _G（模块重载存活）。
+function timetable.getTimeLabelPos()
+    if _G._diagramTimeLabelPos == "top" then return "top" end
+    if _G._diagramTimeLabelPos == "bottom" then return "bottom" end
+    local v = timetableObject._diagramTimeLabelPos
+    if v == "top" then return "top" end
+    return "bottom"
+end
+
+function timetable.setTimeLabelPos(v)
+    if v ~= "top" then v = "bottom" end
+    timetableObject._diagramTimeLabelPos = v
+    _G._diagramTimeLabelPos = v
 end
 
 function timetable.setHasTimetable(line, bool)
@@ -446,12 +518,24 @@ end
 ---@param time number in seconds
 ---@param allConstraints number table in format like: {{30,0,59,0},{9,0,59,0},...}
 function timetable.beforeDepature(constraint, time, allConstraints)
-    local arrivalTimeSec = (60 * constraint[3]) + constraint[4]
-    local departureTimeSec = (60 * constraint[3]) + constraint[4]
+    local arrTime = (constraint[1] * 60 + constraint[2]) % 3600
+    local depTime = (constraint[3] * 60 + constraint[4]) % 3600
     local normalisedTime = time % (60 * 60)
-    local nextArrivalTime = (timetable.getTimeUntilNextConstraint(constraint, allConstraints) + arrivalTimeSec) % (60 * 60)
-    --print( normalisedTime/60, departureTimeSec/60, nextArrivalTime/60)
-    return not (((normalisedTime > departureTimeSec) == (normalisedTime < nextArrivalTime)) ~= (departureTimeSec > nextArrivalTime))
+    -- 单槽位（每周期仅一趟，最常见）：发车前 = 当前周期内还没到发车时刻。
+    -- 旧实现 arrivalTimeSec 误用了发车字段[3][4]，导致 nextArrival == departure、
+    -- 死区为空、永远判定等待（晚点1秒也被扣到下一周期）。
+    if allConstraints == nil or #allConstraints <= 1 then
+        return normalisedTime < depTime
+    end
+    -- 多槽位：发车前 = 不在"已发车、等待下一站到达"的死区 [dep, nextArr) 内
+    local nextArrivalTime = (timetable.getTimeUntilNextConstraint(constraint, allConstraints) + arrTime) % (60 * 60)
+    local inDeadZone
+    if depTime <= nextArrivalTime then
+        inDeadZone = normalisedTime >= depTime and normalisedTime < nextArrivalTime
+    else
+        inDeadZone = normalisedTime >= depTime or normalisedTime < nextArrivalTime
+    end
+    return not inDeadZone
 end
 
 -- This function calcualtes the time from a given constraint to its closest next constraint
