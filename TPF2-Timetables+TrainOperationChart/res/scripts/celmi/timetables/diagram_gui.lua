@@ -2707,12 +2707,16 @@ function diagramGUI.showDiagram()
     -- 自动刷新：勾选"10s 自动刷新"时，每 10s 执行一次完整刷新（与"刷新"按钮等同：
     -- 重新读取时刻表数据 + 重建车次列表含准点 + 重绘运行图）。
     menu.window:onStep(function()
-        -- live vehicle overlay: redrawn once per game second
+        -- live vehicle overlay: redrawn when the game second changes, but at most twice per real
+        -- second (os.clock), so fast game speeds do not rebuild the views more often
         pcall(function()
             if not menu.liveCtx then return end
             local t = timetableHelper.getTime()
             if t == menu.liveLastDraw then return end
+            local okC, real = pcall(os.clock)
+            if okC and real and menu.liveLastReal and real - menu.liveLastReal < 0.5 then return end
             menu.liveLastDraw = t
+            menu.liveLastReal = okC and real or nil
             drawLiveOverlay()
         end)
         pcall(function()
@@ -2751,7 +2755,7 @@ function diagramGUI.showDiagram()
         menu.daLayout = nil; menu.chartArea = nil; menu.appliedTimeLabelPos = nil
         menu.timeBarTop = nil; menu.timeBarBottom = nil; menu.chartH = nil
         menu.lineScrollArea = nil; menu.presetScrollArea = nil
-        menu.liveViews = {}; menu.liveCtx = nil; menu.liveLastDraw = nil
+        menu.liveViews = {}; menu.liveCtx = nil; menu.liveLastDraw = nil; menu.liveLastReal = nil
         stationRowGroups = {}; displayedLines = {}
     end)
 end
