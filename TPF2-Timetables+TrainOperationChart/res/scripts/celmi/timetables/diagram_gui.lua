@@ -1408,8 +1408,88 @@ local function restoreScrollOffset(area, offset)
     end)
 end
 
+-- Text and style class of a vehicle's punctuality entry in the line list.
+local function punctDisplay(pv)
+    local text = D.punct_ontime
+    local punctClass = "timetable-punct-ontime"
+    local diff = nil
+    -- Two stages: before the departure, the arrival decides (early / on time / late);
+    -- after the departure, the departure decides. A train that arrived late but departed on
+    -- time has caught up and shows "on time".
+    if pv.arrDone then
+        if pv.depPunct == "late" then
+            diff = pv.depDiff
+        elseif pv.depPunct == "early" then
+            diff = pv.depDiff
+        end
+    else
+        if pv.arrPunct == "early" then
+            diff = pv.arrDiff  -- negative (early)
+        elseif pv.arrPunct == "late" then
+            diff = pv.arrDiff  -- positive (late)
+        end
+    end
+    if diff then
+        local secs = math.abs(math.floor(diff))
+        local mm = math.floor(secs / 60)
+        local ss = secs % 60
+        local tmStr = string.format("%02d:%02d", mm, ss)
+        if diff > 0 then
+            text = string.format(D.punct_late, tmStr)
+            punctClass = "timetable-punct-late"
+        else
+            text = string.format(D.punct_early, tmStr)
+            punctClass = "timetable-punct-early"
+        end
+    end
+    -- dot and text in one TextView ("●On time"); the style class sets the color
+    return "●" .. text, punctClass
+end
+
+-- Identifies the structure of the line list: the lines (with name, color, check and selection
+-- state) and the vehicles listed under each. If it is unchanged, the list is updated in place.
+local function lineListSignature()
+    local parts = {}
+    local punctData = _G._punctuality or {}
+    for li, ld in pairs(displayedLines) do
+        local c = ld.color
+        local vIds = {}
+        for vId, pv in pairs(punctData) do
+            if pv and pv.lineId and tostring(pv.lineId) == tostring(ld.id) then vIds[#vIds + 1] = tostring(vId) end
+        end
+        table.sort(vIds)
+        parts[#parts + 1] = table.concat({ tostring(li), tostring(ld.id), tostring(ld.name),
+            tostring(ld.checked), tostring(ld.bold),
+            c and string.format("%.3f,%.3f,%.3f", c.x, c.y, c.z) or "-", table.concat(vIds, ",") }, ";")
+    end
+    return table.concat(parts, "|")
+end
+
 local function updateLineList()
     if not menu.lineScrollArea then return end
+    -- Rebuilding the list resets and restores its scroll position, which makes it jump.
+    -- Update the punctuality texts in place when the structure did not change.
+    local sig = lineListSignature()
+    if menu.lineListRows and sig == menu.lineListSig then
+        local okIp = pcall(function()
+            local punctData = _G._punctuality or {}
+            for _, ld in pairs(displayedLines) do
+                local row = menu.lineListRows[tostring(ld.id)]
+                ld.nameView = row.nameView
+                for vId, ptv in pairs(row.punct) do
+                    local pv = punctData[vId]
+                    if pv then
+                        local text, punctClass = punctDisplay(pv)
+                        ptv:setText(text, false)
+                        ptv:setStyleClassList({"timetable-mono-sc", punctClass})
+                    end
+                end
+            end
+        end)
+        if okIp then return end
+    end
+    menu.lineListSig = sig
+    menu.lineListRows = {}
     local prevOffset = nil
     pcall(function()
         local tmp = menu.lineScrollArea:getScrollOffset()
@@ -1446,11 +1526,20 @@ local function updateLineList()
         ic:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, rowH))
         ic:setMaximumSize(api.gui.util.Size.new(600, rowH))
 
+        local row = { punct = {} }
+        menu.lineListRows[tostring(ld.id)] = row
         local ckImg = api.gui.comp.ImageView.new(ld.checked and "ui/checkbox1.tga" or "ui/checkbox0.tga")
         local ckBtn = api.gui.comp.Button.new(ckImg, true)
+        local lineId = tostring(ld.id)
         ckBtn:onClick(function()
-            ld.checked = not ld.checked
-            pcall(function() ckImg:setImage(ld.checked and "ui/checkbox1.tga" or "ui/checkbox0.tga", false) end)
+            -- the row is kept across refreshes, which replace the line data: look it up
+            local cur = nil
+            for _, l in pairs(displayedLines) do
+                if tostring(l.id) == lineId then cur = l; break end
+            end
+            if not cur then return end
+            cur.checked = not cur.checked
+            pcall(function() ckImg:setImage(cur.checked and "ui/checkbox1.tga" or "ui/checkbox0.tga", false) end)
             pcall(function() refreshDiagram() end)
             -- 勾选/取消勾选线路后立即保存到当前预设（内部会触发 _diagramForceSync 同步），
             -- 避免直接退出游戏/关窗时勾选状态丢失（"保存不上"）。
@@ -1470,6 +1559,7 @@ local function updateLineList()
         lb:setStyleClassList({"timetable-avtivateTimetableButton"})
         lb:onClick(function() toggleLineSelection(li) end)
         ld.nameView = nameTv
+        row.nameView = nameTv
         il:addItem(lb)
 
         local dotCont = api.gui.comp.Component.new("dotCont")
@@ -1501,45 +1591,13 @@ local function updateLineList()
             local punctData = _G._punctuality
             for vId, pv in pairs(punctData) do
                 if pv and pv.lineId and tostring(pv.lineId) == tostring(ld.id) then
-                    local text = D.punct_ontime
-                    local punctClass = "timetable-punct-ontime"
-                    local diff = nil
-                    -- 判定（中国铁路逻辑，两段式）：
-                    --   [发车前] 以"停车到站"事件判定到达：早到/正点/晚点都显示，直到发车；
-                    --   [发车后] 以"发车"事件修正为准：晚发→晚点，正点发→正点，早发→早点。
-                    -- 晚点到站但正点发车 = 追回晚点，发车后应显示"正点"（不能按到达晚点掩盖）。
-                    if pv.arrDone then
-                        if pv.depPunct == "late" then
-                            diff = pv.depDiff
-                        elseif pv.depPunct == "early" then
-                            diff = pv.depDiff
-                        end
-                    else
-                        if pv.arrPunct == "early" then
-                            diff = pv.arrDiff  -- 负值（早到）
-                        elseif pv.arrPunct == "late" then
-                            diff = pv.arrDiff  -- 正值（晚到）
-                        end
-                    end
-                    if diff then
-                        local secs = math.abs(math.floor(diff))
-                        local mm = math.floor(secs / 60)
-                        local ss = secs % 60
-                        local tmStr = string.format("%02d:%02d", mm, ss)
-                        if diff > 0 then
-                            text = string.format(D.punct_late, tmStr)
-                            punctClass = "timetable-punct-late"
-                        else
-                            text = string.format(D.punct_early, tmStr)
-                            punctClass = "timetable-punct-early"
-                        end
-                    end
-                    -- 圆点（●）与准点文本合并为"●正点"一体；颜色由样式类决定
-                    local ptv = api.gui.comp.TextView.new("●" .. text)
+                    local text, punctClass = punctDisplay(pv)
+                    local ptv = api.gui.comp.TextView.new(text)
                     ptv:setStyleClassList({"timetable-mono-sc", punctClass})
                     ptv:setMinimumSize(api.gui.util.Size.new(0, 24))
                     ptv:setMaximumSize(api.gui.util.Size.new(600, 24))
                     ptv:setGravity(0, 0.5)
+                    row.punct[tostring(vId)] = ptv
                     pvl:addItem(ptv)
                 end
             end
@@ -2771,6 +2829,7 @@ function diagramGUI.showDiagram()
         menu.stationLabelViews = {}; menu.timeLabelViews = {}
         menu.timeLabels = {}; menu.timeBarTop = nil; menu.timeBarBottom = nil
         menu.lineListLayout = nil; menu.lineListComponent = nil
+        menu.lineListRows = nil; menu.lineListSig = nil
         menu.renderLayout = nil; menu.renderArea = nil
         menu.daLayout = nil; menu.chartArea = nil; menu.appliedTimeLabelPos = nil
         menu.timeBarTop = nil; menu.timeBarBottom = nil; menu.chartH = nil
