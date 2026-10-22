@@ -118,6 +118,34 @@ tests[#tests + 1] = function()
     assert(#diagramTrains.buildRuns({ station(1, "A"), station(2, "B") }, {}) == 0)
 end
 
+tests[#tests + 1] = function()
+    -- waypoints placed along the leg by straight-line distance: A(0) -> w1(10) -> w2(40) -> B(100)
+    local st = {
+        station(1, "A"), waypoint(1, "w1"), waypoint(1, "w2"), station(2, "B"),
+    }
+    st[1].pos = { 0, 0 }; st[2].pos = { 10, 0 }; st[3].pos = { 40, 0 }; st[4].pos = { 100, 0 }
+    diagramTrains.assignLegFractions(st)
+    assert(math.abs(st[2].legFrac - 0.1) < 1e-9 and math.abs(st[3].legFrac - 0.4) < 1e-9)
+    -- missing position: no fraction for the whole leg
+    st[2].legFrac, st[3].legFrac, st[3].pos = nil, nil, nil
+    diagramTrains.assignLegFractions(st)
+    assert(st[2].legFrac == nil and st[3].legFrac == nil)
+    -- leg back to the first stop: B(100) -> w(75) -> A(0)
+    local st2 = { station(1, "A"), station(2, "B"), waypoint(2, "w") }
+    st2[1].pos = { 0, 0 }; st2[2].pos = { 100, 0 }; st2[3].pos = { 75, 0 }
+    diagramTrains.assignLegFractions(st2)
+    assert(math.abs(st2[3].legFrac - 0.25) < 1e-9)
+end
+
+tests[#tests + 1] = function()
+    -- buildRuns matches a waypoint's passing time at its legFrac: dep 01:00, leg 400 s,
+    -- legFrac 0.25 -> expected 02:40; slots 02:40 and 05:00 -> 02:40 wins (equal spacing: 05:00)
+    local st = { station(1, "A", {{0, 0, 1, 0}}), waypoint(1, "w", {{2, 40, 2, 40}, {5, 0, 5, 0}}), station(2, "B") }
+    st[2].legFrac = 0.25
+    local runs = diagramTrains.buildRuns(st, { 400, 400 })
+    assert(runs[1][2].arr == 160, "arr " .. tostring(runs[1][2].arr))
+end
+
 return {
     test = function()
         for k, v in pairs(tests) do

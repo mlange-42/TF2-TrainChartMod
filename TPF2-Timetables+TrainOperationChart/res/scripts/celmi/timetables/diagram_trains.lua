@@ -90,6 +90,52 @@ function diagramTrains.pickSlot(slots, expected, notBefore)
     return best
 end
 
+---Sets legFrac on the waypoints attached to each line stop: the position of the waypoint
+---along the leg (0 = leaving stop, 1 = next stop), from the straight-line distances
+---stop -> waypoint 1 -> ... -> waypoint n -> next stop. A leg where any position is missing
+---gets no legFrac (users fall back to equal spacing).
+---@param stations table flat stop list {isLineStop, pos = {x, y} or nil}
+function diagramTrains.assignLegFractions(stations)
+    local n = #stations
+    local f = 1
+    while f <= n do
+        if stations[f].isLineStop then
+            local chain = { stations[f] }
+            local g = f + 1
+            while g <= n and not stations[g].isLineStop do
+                chain[#chain + 1] = stations[g]
+                g = g + 1
+            end
+            if #chain > 1 then
+                -- next line stop (wraps around to the first stop)
+                local nextStop = nil
+                for h = 0, n - 1 do
+                    local st = stations[(g - 1 + h) % n + 1]
+                    if st.isLineStop then nextStop = st; break end
+                end
+                local nWps = #chain - 1
+                chain[#chain + 1] = nextStop
+                local cum = { 0 }
+                local ok = nextStop ~= nil
+                if ok then
+                    for i = 2, #chain do
+                        local a, b = chain[i - 1].pos, chain[i].pos
+                        if not (a and b) then ok = false; break end
+                        cum[i] = cum[i - 1] + math.sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2)
+                    end
+                end
+                local total = ok and cum[#chain] or 0
+                for i = 2, nWps + 1 do
+                    chain[i].legFrac = (total > 0) and cum[i] / total or nil
+                end
+            end
+            f = g
+        else
+            f = f + 1
+        end
+    end
+end
+
 ---Follows each train of a line through the timetable, starting from each slot of the
 ---first stop that has slots, around the whole line and back to that stop.
 ---@param stations table flat stop list: {stopIndex, isLineStop, uniqueKey, times = {{am,as,dm,ds}, ...}}
@@ -154,7 +200,7 @@ function diagramTrains.buildRuns(stations, legTimes, endAtLast)
                 expected = legStart + legTime
             else
                 wpNo = wpNo + 1
-                expected = legStart + legTime * wpNo / (legWps + 1)
+                expected = legStart + legTime * (st.legFrac or wpNo / (legWps + 1))
             end
             local visit = { flatIdx = f }
             local pick = st.times and #st.times > 0 and diagramTrains.pickSlot(st.times, expected, notBefore)
