@@ -6,27 +6,72 @@ local function dbgPrint(msg)
     if _G._diagramDebug then print("[DiagramGUI] " .. msg) end
 end
 
-local wpEntityIdCache = {}
-local wpEntityIdCounter = 0
-local function getWpEntityId(wpRef)
-    if wpRef ~= nil and wpEntityIdCache[wpRef] then
-        return wpEntityIdCache[wpRef]
-    end
-    wpEntityIdCounter = wpEntityIdCounter + 1
-    local eid = "wpe_" .. wpEntityIdCounter
-    if wpRef ~= nil then
-        wpEntityIdCache[wpRef] = eid
-    end
-    return eid
+-- ===== 性能优化 A 组（2026-08-16 第 21 轮）：热路径的 pcall 目标提到模块级 =====
+-- 原因（玩家反馈"每隔一段时间卡一两帧"的代码侧取证）：本文件与引擎协程里大量使用
+--   pcall(function() return api.engine.xxx(...) end)
+-- 每次执行都会**新建一个闭包对象**；这些函数在引擎协程里每帧被调用几十~上百次、
+-- 在每秒的准点扫描里被调用上千次 → 每秒数万个临时对象 → Lua GC 周期变短 →
+-- 表现为周期性掉 1~2 帧（现实时间、与游戏速度无关）。
+-- 改为 pcall(fn, args...) 复用模块级函数：**错误保护语义完全不变**，只是不再产生闭包垃圾。
+-- 注意：这些函数体只在**调用时**访问 api（模块加载顶层不碰 api —— AGENTS 铁律）。
+local function _entityExists(id) return api.engine.entityExists(id) end
+local function _getComponent(id, ctype) return api.engine.getComponent(id, ctype) end
+local function _lineVehicles(line) return api.engine.system.transportVehicleSystem.getLineVehicles(line) end
+local function _vehiclesWithState(state)
+    return api.engine.system.transportVehicleSystem.getVehiclesWithState(state)
+end
+local function _sendUserStopped(v, m) return api.cmd.sendCommand(api.cmd.make.setUserStopped(v, m)) end
+local function _sendManualDeparture(v, m) return api.cmd.sendCommand(api.cmd.make.setVehicleManualDeparture(v, m)) end
+local function _sendShouldDepart(v) return api.cmd.sendCommand(api.cmd.make.setVehicleShouldDepart(v)) end
+local function _worldGameTime()
+    local t = api.engine.getComponent(api.engine.util.getWorld(), api.type.ComponentType.GAME_TIME).gameTime
+    if t then return math.floor(t / 1000) end
+    return 0
+end
+-- 真实时间秒（os.clock）。取不到时返回 nil（调用方按"本次不节流"处理）。
+local function _realSeconds()
+    local ok, t = pcall(os.clock)
+    if ok and type(t) == "number" then return t end
+    return nil
 end
 
-local function getWpPersistentKey(wpRef, sgEntity, wpIndex)
-    local wpName = "unknown"
+-- 稳定路径点实体 key。实测（2026-08-05）：v.waypoints[i] 是 SignalId 结构（api.type.SignalId），
+-- 暴露数字字段：entity=SignalList 实体号、index=信号列表内序号。
+-- 该身份对物理路径点唯一、与线路无关、与改名无关 → _gwNames 严格一实体一名、跨线路全局同步。
+-- 注意：路径点不是普通 ECS 实体，getComponent(wpRef, ...) 在其上全部报错（pcall 抓不到值），
+-- getEdgeForEdgeObject/MODEL_INSTANCE_LIST 也取不到 —— 只能靠 .entity/.index。
+function timetableHelper.getWaypointEntityKey(wpRef, sgEntity, wpIndex)
+    local sigEntity, sigIndex = nil, nil
     pcall(function()
-        local nc = api.engine.getComponent(wpRef, api.type.ComponentType.NAME)
-        if nc and nc.name and #nc.name > 0 then wpName = nc.name end
+        sigEntity = wpRef.entity
+        sigIndex = wpRef.index
     end)
-    return "gwpk_" .. tostring(sgEntity) .. "_" .. tostring(wpIndex) .. "_" .. wpName
+    if sigEntity ~= nil then
+        return "gws_" .. tostring(sigEntity) .. "_" .. tostring(sigIndex or 0)
+    end
+    -- 降级（理论路径点都带 .entity，此为防御）：edge + 世界坐标
+    local edge = nil
+    pcall(function()
+        edge = api.engine.system.streetSystem.getEdgeForEdgeObject(wpRef)
+    end)
+    local px, py = nil, nil
+    pcall(function()
+        local ml = api.engine.getComponent(wpRef, api.type.ComponentType.MODEL_INSTANCE_LIST)
+        if ml and ml.fatInstances and ml.fatInstances[1] and ml.fatInstances[1].transf then
+            local col = ml.fatInstances[1].transf:col(3)
+            if col then
+                px = string.format("%.2f", tonumber(col.x) or 0)
+                py = string.format("%.2f", tonumber(col.y) or 0)
+            end
+        end
+    end)
+    if edge then
+        if px and py then return "gwp_" .. tostring(edge) .. "_" .. px .. "_" .. py end
+        return "gwp_" .. tostring(edge)
+    end
+    if px and py then return "gwp_p_" .. px .. "_" .. py end
+    -- 最后兜底：父站+序号（不含名字，改名不失效）。该情况下跨线路身份无法保证，属可接受降级。
+    return "gwpk_" .. tostring(sgEntity) .. "_" .. tostring(wpIndex)
 end
 
 local UIStrings = {
@@ -92,9 +137,7 @@ end
 ---@param line number
 -- returns [ vehicle:Number ]
 function timetableHelper.getVehiclesOnLine(line)
-    local ok, res = pcall(function()
-        return api.engine.system.transportVehicleSystem.getLineVehicles(line)
-    end)
+    local ok, res = pcall(_lineVehicles, line)
     if ok and res then return res end
     return {}
 end
@@ -105,9 +148,7 @@ function timetableHelper.getCurrentStation(vehicle)
     if type(vehicle) == "string" then vehicle = tonumber(vehicle) end
     if not(type(vehicle) == "number") then print("Expected String or Number") return -1 end
     if not vehicle then return -1 end
-    local ok, res = pcall(function()
-        return api.engine.getComponent(vehicle, api.type.ComponentType.TRANSPORT_VEHICLE)
-    end)
+    local ok, res = pcall(_getComponent, vehicle, api.type.ComponentType.TRANSPORT_VEHICLE)
     if not ok or not res then return -1 end
     return res.stopIndex + 1
 
@@ -120,9 +161,7 @@ function timetableHelper.getCurrentLine(vehicle)
     if not(type(vehicle) == "number") then print("Expected String or Number") return -1 end
     if not vehicle then return -1 end
 
-    local ok, res = pcall(function()
-        return api.engine.getComponent(vehicle, api.type.ComponentType.TRANSPORT_VEHICLE)
-    end)
+    local ok, res = pcall(_getComponent, vehicle, api.type.ComponentType.TRANSPORT_VEHICLE)
     if not ok or not res then return -1 end
     if res and res.line then return res.line else return -1 end
 end
@@ -134,9 +173,7 @@ function timetableHelper.isInStation(vehicle)
     if type(vehicle) == "string" then vehicle = tonumber(vehicle) end
     if not(type(vehicle) == "number") then print("Expected String or Number") return false end
 
-    local okV, v = pcall(function()
-        return api.engine.getComponent(tonumber(vehicle), api.type.ComponentType.TRANSPORT_VEHICLE)
-    end)
+    local okV, v = pcall(_getComponent, tonumber(vehicle), api.type.ComponentType.TRANSPORT_VEHICLE)
     if not okV then return false end
     return v and v.state == 2
 end
@@ -147,8 +184,8 @@ function timetableHelper.startVehicle(vehicle)
     if type(vehicle) == "string" then vehicle = tonumber(vehicle) end
     if not(type(vehicle) == "number") then print("Expected String or Number") return false end
 
-    pcall(function() api.cmd.sendCommand(api.cmd.make.setUserStopped(vehicle,false)) end)
-    pcall(function() api.cmd.sendCommand(api.cmd.make.setVehicleManualDeparture(vehicle,false)) end)
+    pcall(_sendUserStopped, vehicle, false)
+    pcall(_sendManualDeparture, vehicle, false)
     return nil
 end
 
@@ -158,7 +195,7 @@ function timetableHelper.stopVehicle(vehicle)
     if type(vehicle) == "string" then vehicle = tonumber(vehicle) end
     if not(type(vehicle) == "number") then print("Expected String or Number") return false end
 
-    pcall(function() api.cmd.sendCommand(api.cmd.make.setVehicleManualDeparture(vehicle,true)) end)
+    pcall(_sendManualDeparture, vehicle, true)
     return nil
 end
 
@@ -170,7 +207,7 @@ function timetableHelper.forceDeparture(vehicle)
     if type(vehicle) == "string" then vehicle = tonumber(vehicle) end
     if not(type(vehicle) == "number") then print("Expected String or Number") return false end
 
-    pcall(function() api.cmd.sendCommand(api.cmd.make.setVehicleShouldDepart(vehicle)) end)
+    pcall(_sendShouldDepart, vehicle)
     return nil
 end
 
@@ -183,15 +220,11 @@ function timetableHelper.getPreviousDepartureTime(vehicle)
     local vehicleLineMap = api.engine.system.transportVehicleSystem.getLine2VehicleMap()
     local line = timetableHelper.getCurrentLine(vehicle)
     local departureTimes = {}
-    local ok1, compontent = pcall(function()
-        return api.engine.getComponent(vehicle, 70)
-    end)
+    local ok1, compontent = pcall(_getComponent, vehicle, 70)
     if not ok1 or not compontent or not compontent.stopIndex then return -1 end
     local currentStopIndex = compontent.stopIndex
     for _,v in pairs(vehicleLineMap[line]) do
-        local ok2, vc = pcall(function()
-            return api.engine.getComponent(v, 70)
-        end)
+        local ok2, vc = pcall(_getComponent, v, 70)
         if ok2 and vc and vc.lineStopDepartures then
             departureTimes[#departureTimes + 1] = vc.lineStopDepartures[currentStopIndex + 1]
         end
@@ -205,9 +238,7 @@ function timetableHelper.getTimeUntilDeparture(vehicle)
     if type(vehicle) == "string" then vehicle = tonumber(vehicle) end
     if not(type(vehicle) == "number") then print("Expected String or Number") return -1 end
 
-    local okV, v = pcall(function()
-        return api.engine.getComponent(vehicle, 70)
-    end)
+    local okV, v = pcall(_getComponent, vehicle, 70)
     if not okV then return -1 end
     if v and v.timeUntilCloseDoors then return v.timeUntilCloseDoors else return -1 end
 end
@@ -769,8 +800,8 @@ function timetableHelper.getAllStops(line)
                         local nc = api.engine.getComponent(wpRef, api.type.ComponentType.NAME)
                         if nc and nc.name then wpName = nc.name end
                     end)
-                    if not wpName then wpName = UIStrings.waypoint .. flatIdx end
-                    local gwKey = getWpPersistentKey(wpRef, sgEntity, i)
+                    if not wpName then wpName = UIStrings.waypoint .. wpClassified end
+                    local gwKey = timetableHelper.getWaypointEntityKey(wpRef, sgEntity, i)
                     res[flatIdx] = {
                         id = "wp_" .. k .. "_" .. i,
                         entityId = gwKey,
@@ -862,34 +893,118 @@ function timetableHelper.mergeArray(a,b)
 end
 
 
--- returns [{vehicleID: lineID}]
-function timetableHelper.getAllTimetableRailVehicles()
-    return api.engine.system.transportVehicleSystem.getVehiclesWithState(api.type.enum.TransportVehicleState.AT_TERMINAL)
-    --[[local res = {}
-    local vehicleMap = api.engine.system.transportVehicleSystem.getLine2VehicleMap()
-    for k,v in pairs(vehicleMap) do
-        if (hasTimetable(k)) then
-            for _,v2 in pairs(v) do
-                res[tostring(v2)] = k
+-- 返回车辆 ID 数组（list）：仅包含"勾选了遵循时刻表（hasTimetable == true）"的线路、
+-- 且当前停在站内的车辆（TransportVehicleState.AT_TERMINAL）。
+-- 用户定稿：未勾选"遵循时刻表"的线路完全不受 mod 控车——按游戏默认装卸车后正常发车，
+-- 也不得干预其它未安排时刻表的线路（含公共汽车/电车/船/飞机）。
+-- 注意（三条血泪）：
+-- 1) 调用方传入 hasTimetable 过滤函数。此前改为 getVehiclesWithState 时把过滤漏掉了，
+--    → 协程对全地图所有站内车辆逐帧 stopVehicle/startVehicle，未勾选线路被误扣车；
+-- 2) 返回值必须是"车辆 ID 数组"（值=车辆 ID）。若返回 {车辆ID: 线路ID} 映射表，
+--    协程 for _,v in pairs() 取到的是线路 ID，waitingRequired(线路ID) 内
+--    getComponent(线路, TRANSPORT_VEHICLE) 触发 C++ assert（GetComponentDataIndex，
+--    pcall 抓不住）→ 协程卡死 → 每帧刷 "cannot resume non-suspended coroutine"；
+-- 3) getVehiclesWithState 快照可能含刚删除的失效 ID：必须先 entityExists 校验再
+--    getComponent（AGENTS.md：getComponent 对无效实体 = C++ assert，pcall 无效）。
+--
+-- ===== 性能优化 A 组（2026-08-16 第 21 轮）：本函数有两个口径 =====
+--   · scanByComponent（原口径，保留作**回退**与**自检基准**）：全世界停站车辆 → 逐辆
+--     entityExists + getComponent(TRANSPORT_VEHICLE) 取线路 → hasTimetable 过滤。
+--     开销 = 1 + 2×F 次引擎调用（F = 全世界停站车辆数），每次还各带一个闭包。
+--   · scanByLineIndex（本版本默认）：先取"勾选了遵循时刻表的线路"的车辆集合
+--     （每线一次 getLineVehicles，勾选线路通常个位数），再与全世界停站车辆集合求交
+--     → **逐辆引擎调用降为 0**（只对命中的车做一次 entityExists 保护）。
+--   自检（每 60s 一次）：两个口径的结果集合必须完全一致；一旦不一致 → 永久退回原口径
+--   并打印一次提示（宁可慢也不改变控车行为）。这样即使某版本引擎的车辆 ID 类型/线路
+--   归属与假设不符，也不会出现"该控的车不控了"。
+local scanFastPathOk = true      -- 反查口径是否可用（自检失败 → false）
+local scanNextCheckAt = nil      -- 下次自检的真实时间秒（os.clock）
+
+-- 原口径（稳妥回退 / 自检基准）
+local function scanByComponent(hasTimetable)
+    local res = {}
+    local okS, vehicles = pcall(_vehiclesWithState, api.type.enum.TransportVehicleState.AT_TERMINAL)
+    if not okS or not vehicles then return res end
+    for _, v in pairs(vehicles) do
+        local okEv, exists = pcall(_entityExists, tonumber(v))
+        if okEv and exists == true then
+            local ok, comp = pcall(_getComponent, v, api.type.ComponentType.TRANSPORT_VEHICLE)
+            if ok and comp and comp.line and hasTimetable and hasTimetable(comp.line) == true then
+                res[#res + 1] = v
             end
         end
     end
-    return res]]--
+    return res
+end
+
+-- 反查口径（勾选线路的车辆 ∩ 停站车辆）
+local function scanByLineIndex(tickedLines)
+    local res = {}
+    if type(tickedLines) ~= "table" then return res end
+    local allowed = {}
+    local any = false
+    for _, line in ipairs(tickedLines) do
+        local okL, vehs = pcall(_lineVehicles, line)
+        if okL and vehs then
+            for _, v in pairs(vehs) do
+                -- 同时登记原值与字符串两种键：两套引擎接口的 ID 类型若不统一也能命中
+                allowed[v] = true
+                allowed[tostring(v)] = true
+                any = true
+            end
+        end
+    end
+    if not any then return res end
+    local okS, vehicles = pcall(_vehiclesWithState, api.type.enum.TransportVehicleState.AT_TERMINAL)
+    if not okS or not vehicles then return res end
+    for _, v in pairs(vehicles) do
+        if allowed[v] or allowed[tostring(v)] then
+            local okEv, exists = pcall(_entityExists, tonumber(v))
+            if okEv and exists == true then res[#res + 1] = v end
+        end
+    end
+    return res
+end
+
+-- 两套口径结果是否等价（按字符串键比较集合）
+local function sameVehicleSet(a, b)
+    if #a ~= #b then return false end
+    local seen = {}
+    for _, v in ipairs(a) do seen[tostring(v)] = true end
+    for _, v in ipairs(b) do
+        if not seen[tostring(v)] then return false end
+    end
+    return true
+end
+
+---@param hasTimetable function 线路是否"遵循时刻表"的判定函数
+---@param tickedLines table|nil 勾选线路的 ID 数组（调用方从 timetableObject 纯 Lua 取；给了才走反查口径）
+function timetableHelper.getAllTimetableRailVehicles(hasTimetable, tickedLines)
+    if not (scanFastPathOk and tickedLines) then
+        return scanByComponent(hasTimetable)
+    end
+    local res = scanByLineIndex(tickedLines)
+    -- 周期性自检：真实时间每 60s 比对一次两套口径（各一次全量扫描，开销可忽略）
+    local now = _realSeconds()
+    if now and (scanNextCheckAt == nil or now >= scanNextCheckAt) then
+        scanNextCheckAt = now + 60
+        local ref = scanByComponent(hasTimetable)
+        if not sameVehicleSet(res, ref) then
+            scanFastPathOk = false
+            print("[Timetable] perf: line-index scan mismatch (fast=" .. tostring(#res)
+                .. " ref=" .. tostring(#ref) .. ") -> fallback to component scan")
+            return ref
+        end
+    end
+    return res
 end
 
 
 -- returns Number, current GameTime in seconds
 function timetableHelper.getTime()
-    local okT, time = pcall(function()
-        return api.engine.getComponent(api.engine.util.getWorld(), api.type.ComponentType.GAME_TIME).gameTime
-    end)
-    if not okT then return 0 end
-    if time then
-        time = math.floor(time/ 1000)
-        return time
-    else
-        return 0
-    end
+    local okT, time = pcall(_worldGameTime)
+    if not okT or type(time) ~= "number" then return 0 end
+    return time
 end
 
 ---@param tab table
@@ -972,5 +1087,33 @@ function timetableHelper.constraintStringToInt(i)
 
 end
 
+-- Liang-Barsky 线段矩形裁剪（纯函数，可单测）。运行图放大（2026-08-16 功能）用：
+-- 折线各段先按小时切段（drawWrappedSegment），再按可视时间窗口/站区窗口裁剪。
+-- 输入：线段端点 (x1,y1)-(x2,y2)，矩形 [xMin,xMax]×[yMin,yMax]。
+-- 线段完全在矩形外 → 返回 nil；否则返回裁剪后的 (cx1, cy1, cx2, cy2)。
+function timetableHelper.clipSegmentToRect(x1, y1, x2, y2, xMin, xMax, yMin, yMax)
+    local dx, dy = x2 - x1, y2 - y1
+    local t0, t1 = 0, 1
+    local function clipAxis(p, q)
+        if p == 0 then
+            -- 平行于该轴：q < 0 表示整段在矩形外侧 → 丢弃
+            return q >= 0
+        end
+        local r = q / p
+        if p < 0 then
+            if r > t1 then return false end
+            if r > t0 then t0 = r end
+        else
+            if r < t0 then return false end
+            if r < t1 then t1 = r end
+        end
+        return true
+    end
+    if not (clipAxis(-dx, x1 - xMin) and clipAxis(dx, xMax - x1)
+        and clipAxis(-dy, y1 - yMin) and clipAxis(dy, yMax - y1)) then
+        return nil
+    end
+    return x1 + t0 * dx, y1 + t0 * dy, x1 + t1 * dx, y1 + t1 * dy
+end
 
 return timetableHelper

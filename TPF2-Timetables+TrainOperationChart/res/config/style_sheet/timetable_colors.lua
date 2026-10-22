@@ -248,9 +248,15 @@ local mediziner = {
 local availableColorSchemes = {
     defaultColors, marc345, mediziner
 }
-if game.config.gui.lineColors then
-    table.insert(availableColorSchemes, game.config.gui.lineColors)
-end
+-- 防御：引擎在加载存档后会重建样式表，此时 game.config.gui 可能尚未初始化。
+-- 模块顶层直接访问 game.config.gui.lineColors 会抛 "attempt to index a nil value (field 'gui')"，
+-- 导致 "Failed to load .../timetable_colors.lua"，与进存档崩溃（AN ERROR IS OCCURED）强相关。
+-- 包 pcall 保护：取不到线路颜色方案时仅跳过，不影响样式表其余内容。
+pcall(function()
+    if game and game.config and game.config.gui and game.config.gui.lineColors then
+        table.insert(availableColorSchemes, game.config.gui.lineColors)
+    end
+end)
 
 -- copied from timetable_helper.lua, import is not possible
 -- if you change it here, also change it there!
@@ -269,6 +275,13 @@ function data()
 
     for _, schema in ipairs(availableColorSchemes) do
         for _, color in ipairs(schema) do
+            -- 防御：线路颜色方案（game.config.gui.lineColors）条目结构可能不是标准 {r,g,b}，
+            -- 例如 userdata 或 nil 条目，直接取 color[1]/color[2]/color[3] 会抛 Lua 错误。
+            -- 单个坏条目跳过，不影响其余样式。
+            if type(color) ~= "table" or type(color[1]) ~= "number"
+               or type(color[2]) ~= "number" or type(color[3]) ~= "number" then
+                goto continueColor
+            end
             local colorString = getColorString(color[1], color[2], color[3])
             if not lookup[colorString] then
                 -- It is possible that a color is part of two color mods, but we only need one style for it.
@@ -286,6 +299,7 @@ function data()
                     color = colorArray,
                 })
             end
+            ::continueColor::
         end
     end
 
