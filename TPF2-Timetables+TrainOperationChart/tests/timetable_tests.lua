@@ -1073,6 +1073,85 @@ timetableTests[#timetableTests + 1] = function()
     print("  OK: waitingRequired closest-slot matching (two slots)")
 end
 
+-- Per-vehicle slot tracking: the delay a train leaves a stop with is carried to the next
+-- timed stop, so the train is matched to its own slot there even when it is more than half
+-- a slot gap late. Slots every 10 min: stop 1 x0/x1, stop 2 x5/x6. Neither stop holds late trains.
+timetableTests[#timetableTests + 1] = function()
+    local h = 3600 * 13
+    local mockTime, mockArrival, mockStop = h, h, 1
+    package.loaded["celmi/timetables/timetable_helper"] = {
+        getTime = function() return mockTime end,
+        getCurrentLine = function() return 100 end,
+        getCurrentStation = function() return mockStop end,
+        getTimeUntilDeparture = function() return 3 end,
+        getStationID = function() return 1001 end,
+        forceDeparture = function() end,
+    }
+    local prevApi = _G.api
+    _G.api = {
+        engine = {
+            entityExists = function() return true end,
+            getComponent = function(id, ctype)
+                if ctype == 70 then return { doorsTime = mockArrival * 1000000 } end
+                return nil
+            end,
+        },
+        type = { ComponentType = { LINE = 60, TRANSPORT_VEHICLE = 70 } },
+    }
+    package.loaded[".res.scripts.celmi.timetables.timetable"] = nil
+    local tt = require ".res.scripts.celmi.timetables.timetable"
+    tt.setDelayTolerance(300)
+    local s1, s2 = {}, {}
+    for m = 0, 50, 10 do
+        s1[#s1 + 1] = { m, 0, m + 1, 0 }
+        s2[#s2 + 1] = { m + 5, 0, m + 6, 0 }
+    end
+    tt.setTimetableObject({ ["100"] = { hasTimetable = true, stations = {
+        [1] = { holdLate = false, conditions = { type = "ArrDep", ArrDep = s1 } },
+        [2] = { holdLate = false, conditions = { type = "ArrDep", ArrDep = s2 } },
+    } } })
+    tt.setCurrentlyWaiting({})
+    local function delayOf(v) return tt.getCurrentlyWaiting()["100"].vehicleDelay[v].delay end
+
+    -- Stop 1: arrives 03:00, leaves 03:30 -> 2:30 late for 00/01.
+    mockStop, mockArrival, mockTime = 1, h + 180, h + 210
+    assert(tt.waitingRequired("V1") == false, "stop 1: late, departs")
+    assert(delayOf("V1") == 150, "carries 150 s delay, got " .. tostring(delayOf("V1")))
+
+    -- Stop 2: arrives 11:00. Without tracking this is closer to 15/16 (early, would wait).
+    -- With the carried delay it is 08:30 on schedule -> late for 05/06 -> departs.
+    mockStop, mockArrival, mockTime = 2, h + 660, h + 690
+    assert(tt.waitingRequired("V1") == false, "stop 2: matched to its own slot 05/06, departs")
+    assert(delayOf("V1") == 330, "delay grows to 330 s, got " .. tostring(delayOf("V1")))
+
+    -- Re-evaluated at the same stop after the 40 s guard: uses the delay it arrived with.
+    mockTime = h + 740
+    assert(tt.waitingRequired("V1") == false, "re-evaluation at the same stop still departs")
+    assert(tt.getCurrentlyWaiting()["100"].vehicleDelay["V1"].inDelay == 150, "keeps the arrival delay")
+
+    -- Next lap, stop 1: arrives 16:00 (5:30 late for 10/11 on schedule) and departs.
+    mockStop, mockArrival, mockTime = 1, h + 960, h + 990
+    assert(tt.waitingRequired("V1") == false, "stop 1 next lap: still late, departs")
+
+    -- Catching up: left stop 1 2:30 late for 00/01, arrives at stop 2 at 04:30 = 02:00 on
+    -- schedule -> early for 05/06, waits until 06:00 and runs on time again.
+    tt.getCurrentlyWaiting()["100"].vehicleDelay["V3"] = { delay = 150, inDelay = 0, time = h + 210 }
+    mockStop, mockArrival, mockTime = 2, h + 270, h + 300
+    assert(tt.waitingRequired("V3") == true, "stop 2: caught up, early for 05/06")
+    mockTime = h + 360
+    assert(tt.waitingRequired("V3") == false, "released at 06:00")
+    assert(delayOf("V3") == 0, "back on time")
+
+    -- An old record is ignored.
+    tt.setCurrentlyWaiting({ ["100"] = { stations = {}, vehicleDelay = {
+        V2 = { delay = 330, inDelay = 0, time = h - 4 * 3600 } } } })
+    mockStop, mockArrival, mockTime = 2, h + 660, h + 690
+    assert(tt.waitingRequired("V2") == true, "stale delay ignored: 11:00 is early for 15/16")
+
+    _G.api = prevApi
+    print("  OK: per-vehicle delay carried between stops")
+end
+
 return {
     test = function()
         for k,v in pairs(timetableTests) do
