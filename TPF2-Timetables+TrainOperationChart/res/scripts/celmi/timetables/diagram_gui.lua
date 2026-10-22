@@ -1136,7 +1136,7 @@ local function refreshDiagram()
         local pv = makeLRV()
         pv:setColor(api.type.Vec4f.new(0.85, 0.85, 0.85, 1))
         pv:setWidth(1)
-        local gh = 7 * scale
+        local gh = 10 * scale
         local seen = {}
         for _, pl in ipairs(platformLabels) do
             local m = (pl.t % 3600) / 60
