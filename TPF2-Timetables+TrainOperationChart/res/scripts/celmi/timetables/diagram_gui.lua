@@ -25,6 +25,8 @@ local menu = {
     stationLabelViews = {}, timeLabelViews = {},
     lineListLayout = nil, lineScrollArea = nil,
     presetScrollArea = nil,
+    -- live vehicle overlay: its line views (topmost) and the chart geometry of the last refresh
+    liveViews = {}, liveCtx = nil,
 }
 
 local allStations = {}
@@ -129,6 +131,8 @@ local D = {
     settings_spacing_time = _("diagram_settings_spacing_time_i18n"),
     settings_platforms = _("diagram_settings_platforms_i18n"),
     settings_platforms_show = _("diagram_settings_platforms_show_i18n"),
+    settings_vehicles = _("diagram_settings_vehicles_i18n"),
+    settings_vehicles_show = _("diagram_settings_vehicles_show_i18n"),
     punctuality = _("diagram_punctuality_i18n"),
     punct_ontime = _("diagram_punct_ontime_i18n"),
     punct_early = _("diagram_punct_early_i18n"),
@@ -759,6 +763,156 @@ local function buildYMap(selList, groups, sorts, rWin0, rWinLen, h)
     return map, rowYs
 end
 
+local function clearLiveViews()
+    if menu.renderLayout then
+        for _, v in ipairs(menu.liveViews) do
+            pcall(function() menu.renderLayout:removeItem(v) end)
+        end
+    end
+    menu.liveViews = {}
+end
+
+-- Position and delay of one vehicle on the chart, or nil if it cannot be placed.
+-- At a stop: the stop's row, delay measured to the planned dwell. Between stops: on the planned
+-- leg, shifted by the delay the vehicle departed with (diagramTrains.trainOnLeg).
+-- Needs a timetabled stop: the current one, or the one the vehicle departed from.
+local function locateVehicle(ld, vehicle, now, yMap, keepSeg)
+    local okEv, exists = pcall(function() return api.engine.entityExists(tonumber(vehicle)) end)
+    if not (okEv and exists == true) then return nil end
+    local okC, vc = pcall(function()
+        return api.engine.getComponent(tonumber(vehicle), api.type.ComponentType.TRANSPORT_VEHICLE)
+    end)
+    if not (okC and vc and vc.stopIndex) then return nil end
+    local stations = ld.stations
+    local stopFlat, nStops = {}, 0
+    for f, st in ipairs(stations) do
+        if st.isLineStop and st.stopIndex then
+            stopFlat[st.stopIndex] = f
+            if st.stopIndex > nStops then nStops = st.stopIndex end
+        end
+    end
+    if nStops == 0 then return nil end
+
+    if vc.state == 2 then
+        local s = vc.stopIndex + 1
+        local f = stopFlat[s]
+        local st = f and stations[f]
+        local y = st and yMap[st.uniqueKey]
+        if not (y and #st.times > 0) then return nil end
+        -- arrival: from the punctuality scanner if it saw this stop, else the doors time
+        local arrival = nil
+        local pv = _G._punctuality and _G._punctuality[tostring(vehicle)]
+        if pv and pv.thisStopIndex == vc.stopIndex and pv.arrTime then arrival = pv.arrTime end
+        if not arrival and vc.doorsTime and vc.doorsTime > 0 then arrival = math.floor(vc.doorsTime / 1000000) end
+        local plArr, plDep = timetable.assignSlot(st.times, arrival or now)
+        if not plArr then return nil end
+        return { y = y, delay = diagramTrains.dwellDelay(plArr, plDep, now) }
+    elseif vc.state == 1 then
+        -- en route: stopIndex is the next stop, the leg starts at the previous one
+        local s = (vc.stopIndex - 1) % nStops + 1
+        local f = stopFlat[s]
+        local st = f and stations[f]
+        if not (st and #st.times > 0 and ld.runs) then return nil end
+        local d = vc.lineStopDepartures and vc.lineStopDepartures[s]
+        if not (d and d > 0) then return nil end
+        local dep = math.floor(d / 1000)
+        if dep > now or now - dep > 3600 then return nil end
+        local _, plDep = timetable.assignSlot(st.times, dep)
+        if not plDep then return nil end
+        local visits = diagramTrains.legVisits(ld.runs, stations, f, plDep)
+        if not visits then return nil end
+        local pts = {}
+        for vi, v in ipairs(visits) do
+            local vs = stations[v.flatIdx]
+            local y = yMap[vs.uniqueKey]
+            if not y then
+                -- waypoints off the axis are skipped like in the planned lines; stations break the leg
+                if vs.stopType == "station" then return nil end
+            elseif vi == 1 then
+                pts[#pts + 1] = { t = v.dep, y = y }
+            elseif v.arr then
+                pts[#pts + 1] = { t = v.arr, y = y }
+                if vi < #visits and v.dep then pts[#pts + 1] = { t = v.dep, y = y } end
+            end
+        end
+        local lastV = visits[#visits]
+        if #pts < 2 or not lastV.arr or pts[#pts].t ~= lastV.arr then return nil end
+        if not keepSeg(pts[1].y, pts[#pts].y) then return nil end
+        local y, delay = diagramTrains.trainOnLeg(pts, now, dep - plDep)
+        return { y = y, delay = delay }
+    end
+    return nil
+end
+
+-- Live vehicle overlay: a "now" line and, for every vehicle of the displayed lines, a square at
+-- (now, position) plus a whisker back to where the timetable has it now (length = delay),
+-- colored like the punctuality dots. Rebuilt every game second; drawn on top of the chart.
+local function drawLiveOverlay()
+    clearLiveViews()
+    local ctx = menu.liveCtx
+    if not (ctx and menu.renderLayout and timetable.getShowVehicles()) then return end
+    local now = timetableHelper.getTime()
+    local nowM = (now % 3600) / 60
+    local tol = timetable.getPunctThreshold()
+
+    local byClass = { ontime = {}, early = {}, late = {} }
+    local any = false
+    for _, ld in pairs(displayedLines) do
+        if ld.checked and ld.runs then
+            for _, vehicle in pairs(timetableHelper.getVehiclesOnLine(ld.id)) do
+                local okL, m = pcall(locateVehicle, ld, vehicle, now, ctx.yMap, ctx.keepSeg)
+                if okL and m and m.y >= 0 and m.y <= ctx.dh then
+                    local cls = (m.delay > tol and "late") or (m.delay < -tol and "early") or "ontime"
+                    table.insert(byClass[cls], m)
+                    any = true
+                end
+            end
+        end
+    end
+
+    local function makeView(r, g, b, a, width)
+        local v = api.gui.comp.LineRenderView.new()
+        v:setMinimumSize(api.gui.util.Size.new(ctx.lw, ctx.lh))
+        v:setMaximumSize(api.gui.util.Size.new(ctx.lw, ctx.lh))
+        menu.renderLayout:addItem(v, 0.5, 0)
+        table.insert(menu.liveViews, v)
+        v:setColor(api.type.Vec4f.new(r, g, b, a))
+        v:setWidth(width)
+        return v
+    end
+
+    local nowVisible = nowM >= ctx.tWin0 and nowM <= ctx.tWin1
+    if nowVisible then
+        local x = ctx.timeX(nowM)
+        makeView(1, 1, 1, 0.35, 1):addLine(api.type.Vec2f.new(x, 0), api.type.Vec2f.new(x, ctx.dh))
+    end
+    if not any then return end
+
+    -- same colors as the punctuality dots of the line list
+    local COLORS = { ontime = {1, 1, 1}, early = {0, 1, 0}, late = {1, 0, 0} }
+    local half = 4 * ctx.scale
+    for cls, markers in pairs(byClass) do
+        if #markers > 0 then
+            local c = COLORS[cls]
+            local wv = makeView(c[1], c[2], c[3], 0.9, 2)
+            for _, m in ipairs(markers) do
+                if math.abs(m.delay) >= 1 then
+                    local t1, t2 = math.min(now, now - m.delay), math.max(now, now - m.delay)
+                    ctx.drawWrapped(wv, t1, m.y, t2, m.y)
+                end
+            end
+            if nowVisible then
+                -- a filled square: one short, wide stroke
+                local sv = makeView(c[1], c[2], c[3], 1, 2 * half)
+                local x = ctx.timeX(nowM)
+                for _, m in ipairs(markers) do
+                    sv:addLine(api.type.Vec2f.new(x - half, m.y), api.type.Vec2f.new(x + half, m.y))
+                end
+            end
+        end
+    end
+end
+
 -- 清除运行图渲染区（折线视图 + 站名标签 + 时间标签），全部 pcall 保护。
 local function clearDiagramViews()
     if menu.renderLayout then
@@ -767,6 +921,8 @@ local function clearDiagramViews()
         end
     end
     menu.lineRenderViews = {}
+    clearLiveViews()
+    menu.liveCtx = nil
     if menu.stationLabels and menu.stationLabels.layout then
         for _, oldCont in ipairs(menu.stationLabelViews) do
             pcall(function() menu.stationLabels.layout:removeItem(oldCont) end)
@@ -1016,9 +1172,6 @@ local function refreshDiagram()
     -- Platform labels, collected while drawing: {t = absolute seconds, y = px, text}
     local showPlatforms = timetable.getShowPlatforms()
     local platformLabels = {}
-    if #displayedLines > 0 then
-    for _ in pairs(displayedLines) do makeLRV() end
-
     -- 折线单段绘制（放大窗口感知）：先按小时切段，再对每段做窗口裁剪。
     -- 裁剪用 Liang-Barsky（timetableHelper.clipSegmentToRect），窗口 = 可视时间范围 × 画布高
     -- （车站方向天然被窗口限制——窗口外站无 Y 值、折线已断，y 裁剪只是防御）。
@@ -1052,6 +1205,17 @@ local function refreshDiagram()
         end
     end
 
+    -- Direction filter: only draw legs going up (y2 < y1) / down (y2 > y1); dwells (dy == 0) always
+    local filterDir = timetable.getPolylineFilter()
+    local function keepSeg(y1, y2)
+        if filterDir == "up" then return y2 <= y1 end
+        if filterDir == "down" then return y2 >= y1 end
+        return true
+    end
+
+    if #displayedLines > 0 then
+    for _ in pairs(displayedLines) do makeLRV() end
+
     for li, ld in pairs(displayedLines) do
         if not ld.checked then goto continueLine end
         table.insert(drawDebug, ld.name)
@@ -1060,11 +1224,13 @@ local function refreshDiagram()
         local lv = menu.lineRenderViews[li + 1]
         if lv then
             lv:setColor(ld.color)
-            local lw = ld.bold and 4 or 2
+            local lw = ld.bold and 3 or 1.5
             -- 按行程推算逐车次跟踪：从首个有时刻的停靠站的每个槽位出发，按区间运行时间估算
             -- 到达下一站的时刻并选取最接近的槽位（而非按槽位序号配对）。
             -- 交路线：末站为换乘站，列车到站即换下一交路，不画本线发车，也不折返/循环闭合。
-            for _, run in ipairs(diagramTrains.buildRuns(ld.stations, ld.legTimes or {}, isJRL)) do
+            -- The runs are kept for the live vehicle overlay.
+            ld.runs = diagramTrains.buildRuns(ld.stations, ld.legTimes or {}, isJRL)
+            for _, run in ipairs(ld.runs) do
                 local polylines = {}
                 local cur = {}
                 for vi, visit in ipairs(run) do
@@ -1096,13 +1262,6 @@ local function refreshDiagram()
                 end
 
                 lv:setWidth(lw)
-                -- 运行方向筛选：只画往上(y2<y1)/往下(y2>y1)的斜线段；停站水平段(dy==0)始终画
-                local filterDir = timetable.getPolylineFilter()
-                local function keepSeg(y1, y2)
-                    if filterDir == "up" then return y2 <= y1 end
-                    if filterDir == "down" then return y2 >= y1 end
-                    return true
-                end
                 for _, pl in ipairs(polylines) do
                     for i = 1, #pl - 1 do
                         if keepSeg(pl[i].y, pl[i + 1].y) then
@@ -1164,6 +1323,10 @@ local function refreshDiagram()
             end
         end
     end
+
+    menu.liveCtx = { yMap = yMap, dw = dw, dh = dh, lw = lw_logical, lh = lh_logical, scale = scale,
+        tWin0 = tWin0, tWin1 = tWin1, timeX = timeX, drawWrapped = drawWrappedSegment, keepSeg = keepSeg }
+    drawLiveOverlay()
 
     dbgPrint("draw names: " .. table.concat(drawDebug, ", "))
 end
@@ -2079,8 +2242,8 @@ function diagramGUI.showDiagram()
             local cc = api.gui.comp.Component.new("settingsContent")
             local cl = api.gui.layout.BoxLayout.new("VERTICAL")
             cc:setLayout(cl)
-            cc:setMinimumSize(api.gui.util.Size.new(320, 510))
-            cc:setMaximumSize(api.gui.util.Size.new(320, 510))
+            cc:setMinimumSize(api.gui.util.Size.new(320, 560))
+            cc:setMaximumSize(api.gui.util.Size.new(320, 560))
 
             local curAuto = timetable.getDiagramAutoRefresh()
             local curPos = timetable.getTimeLabelPos()
@@ -2096,6 +2259,7 @@ function diagramGUI.showDiagram()
             local selFilter = curFilter
             local selSpacing = timetable.getRowSpacing()
             local selPlatforms = timetable.getShowPlatforms()
+            local selVehicles = timetable.getShowVehicles()
 
             local function makeSectionLabel(text)
                 local lbl = api.gui.comp.TextView.new(text)
@@ -2209,6 +2373,18 @@ function diagramGUI.showDiagram()
             platRl:addItem(platBtn); platRl:addItem(platLbl)
             cl:addItem(platRow)
 
+            -- Section 7: live vehicle overlay (positions and delays)
+            cl:addItem(makeSectionLabel(D.settings_vehicles))
+
+            local vehicleCk = api.gui.comp.ImageView.new(selVehicles and "ui/checkbox1.tga" or "ui/checkbox0.tga")
+            local vehicleBtn = api.gui.comp.Button.new(vehicleCk, true)
+            local vehicleLbl = api.gui.comp.TextView.new(D.settings_vehicles_show)
+            local vehicleRow = api.gui.comp.Component.new("settingRowVehicles")
+            local vehicleRl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+            vehicleRow:setLayout(vehicleRl)
+            vehicleRl:addItem(vehicleBtn); vehicleRl:addItem(vehicleLbl)
+            cl:addItem(vehicleRow)
+
             local btnRow = api.gui.comp.Component.new("settingBtns")
             local btnRl = api.gui.layout.BoxLayout.new("HORIZONTAL")
             btnRow:setLayout(btnRl)
@@ -2221,7 +2397,7 @@ function diagramGUI.showDiagram()
             settingsWinRef = w
             w:addHideOnCloseHandler()
             w:setMovable(true)
-            w:setSize(api.gui.util.Size.new(340, 550))
+            w:setSize(api.gui.util.Size.new(340, 600))
             w:setPosition(400, 300)
 
             autoBtn:onClick(function()
@@ -2238,6 +2414,10 @@ function diagramGUI.showDiagram()
                 selPlatforms = not selPlatforms
                 pcall(function() platCk:setImage(selPlatforms and "ui/checkbox1.tga" or "ui/checkbox0.tga", false) end)
             end)
+            vehicleBtn:onClick(function()
+                selVehicles = not selVehicles
+                pcall(function() vehicleCk:setImage(selVehicles and "ui/checkbox1.tga" or "ui/checkbox0.tga", false) end)
+            end)
             okBtn:onClick(function()
                 pcall(function() w:setVisible(false, false) end)
                 -- 点"确定"才应用设置并刷新运行图：
@@ -2248,6 +2428,7 @@ function diagramGUI.showDiagram()
                 -- 5) 运行方向筛选（重绘折线：只画往上/往下/全部）
                 -- 6) 车站间距（重算各行纵坐标）
                 -- 7) platform number labels
+                -- 8) live vehicle overlay
                 local okApply, applyErr = pcall(function()
                     timetable.setDiagramAutoRefresh(selAuto)
                     timetable.setTimeLabelPos(selPos)
@@ -2256,6 +2437,7 @@ function diagramGUI.showDiagram()
                     timetable.setPolylineFilter(selFilter)
                     timetable.setRowSpacing(selSpacing)
                     timetable.setShowPlatforms(selPlatforms)
+                    timetable.setShowVehicles(selVehicles)
                     _G._diagramForceSync = true
                     applyTimeLabelPosition()
                     -- 布局切换（ca 重放/尺寸/时间条可见性）需要一帧让引擎重排收敛后再刷新——
@@ -2503,6 +2685,14 @@ function diagramGUI.showDiagram()
     -- 自动刷新：勾选"10s 自动刷新"时，每 10s 执行一次完整刷新（与"刷新"按钮等同：
     -- 重新读取时刻表数据 + 重建车次列表含准点 + 重绘运行图）。
     menu.window:onStep(function()
+        -- live vehicle overlay: redrawn once per game second
+        pcall(function()
+            if not menu.liveCtx then return end
+            local t = timetableHelper.getTime()
+            if t == menu.liveLastDraw then return end
+            menu.liveLastDraw = t
+            drawLiveOverlay()
+        end)
         pcall(function()
             if not timetable.getDiagramAutoRefresh() then return end
             local t = timetableHelper.getTime()
@@ -2539,6 +2729,7 @@ function diagramGUI.showDiagram()
         menu.daLayout = nil; menu.chartArea = nil; menu.appliedTimeLabelPos = nil
         menu.timeBarTop = nil; menu.timeBarBottom = nil; menu.chartH = nil
         menu.lineScrollArea = nil; menu.presetScrollArea = nil
+        menu.liveViews = {}; menu.liveCtx = nil; menu.liveLastDraw = nil
         stationRowGroups = {}; displayedLines = {}
     end)
 end
