@@ -1,3 +1,5 @@
+local diagramTrains = require "celmi/timetables/diagram_trains"
+
 local timetableHelper = {}
 
 -- 调试汇总日志：受 _G._diagramDebug 开关控制（默认关闭），避免每次刷新/打开窗口的
@@ -410,6 +412,84 @@ function timetableHelper.getLegTimes(line)
     else
         return {}
     end
+end
+
+local function getEntityPosition(entity)
+    local ok, e = pcall(function() return game.interface.getEntity(entity) end)
+    if not (ok and e) then return nil end
+    local p = e.position
+    if not p and e.stations and e.stations[1] then
+        local ok2, s = pcall(function() return game.interface.getEntity(e.stations[1]) end)
+        if ok2 and s then p = s.position end
+    end
+    if not p then return nil end
+    local x, y = p[1] or p.x, p[2] or p.y
+    if type(x) ~= "number" or type(y) ~= "number" then return nil end
+    return x, y
+end
+
+---@param line number | string
+-- returns [seconds] travel time estimate of the leg leaving each stop, indexed by stop index.
+-- Uses the median of the measured sectionTimes of all vehicles on the line; legs no vehicle has
+-- driven yet get a share of the round trip estimated from the line frequency, split by distance.
+-- Entries may be nil where no estimate is possible.
+function timetableHelper.getLegTimeEstimates(line)
+    if type(line) == "string" then line = tonumber(line) end
+    if not(type(line) == "number") then return {} end
+    local okL, lineObject = pcall(function()
+        return api.engine.getComponent(line, api.type.ComponentType.LINE)
+    end)
+    if not (okL and lineObject and lineObject.stops) then return {} end
+    local stationGroups = {}
+    local n = 0
+    for k, v in pairs(lineObject.stops) do
+        stationGroups[k] = v.stationGroup
+        if k > n then n = k end
+    end
+    if n == 0 then return {} end
+
+    local vehicles = timetableHelper.getVehiclesOnLine(line)
+    local samples = {}
+    local vehicleCount = 0
+    for _, v in pairs(vehicles) do
+        vehicleCount = vehicleCount + 1
+        local okV, vc = pcall(function()
+            return api.engine.getComponent(v, api.type.ComponentType.TRANSPORT_VEHICLE)
+        end)
+        if okV and vc and vc.sectionTimes then
+            for i = 1, n do
+                local okT, t = pcall(function() return vc.sectionTimes[i] end)
+                if okT and type(t) == "number" and t > 0 then
+                    samples[i] = samples[i] or {}
+                    table.insert(samples[i], t)
+                end
+            end
+        end
+    end
+
+    local roundTrip = nil
+    local okE, lineEntity = pcall(function() return game.interface.getEntity(line) end)
+    if okE and lineEntity and type(lineEntity.frequency) == "number" and lineEntity.frequency > 0 and vehicleCount > 0 then
+        roundTrip = vehicleCount / lineEntity.frequency
+    end
+
+    local positions = {}
+    for i = 1, n do
+        local sg = stationGroups[i]
+        if type(sg) == "number" and sg > 0 then
+            local x, y = getEntityPosition(sg)
+            if x then positions[i] = {x, y} end
+        end
+    end
+    local distances = {}
+    for i = 1, n do
+        local a, b = positions[i], positions[i % n + 1]
+        if a and b then
+            distances[i] = math.sqrt((a[1] - b[1]) ^ 2 + (a[2] - b[2]) ^ 2)
+        end
+    end
+
+    return diagramTrains.estimateLegTimes(samples, distances, roundTrip, n)
 end
 
 -------------------------------------------------------------
