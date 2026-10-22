@@ -1000,7 +1000,11 @@ local function refreshDiagram()
     local function timeX(m)  -- m = 分钟
         return (m - tWin0) / (tWin1 - tWin0) * dw
     end
-    local yMap, rowYs = buildYMap(selList, groups, sorts, rWin0, rWinLen, dh)
+    -- Margin above the first and below the last row, so markers on those rows are not cut off.
+    local margin = math.min(8 * scale, dh / 4)
+    local yMap, rowYs = buildYMap(selList, groups, sorts, rWin0, rWinLen, dh - 2 * margin)
+    for k, y in pairs(yMap) do yMap[k] = y + margin end
+    for i, y in pairs(rowYs) do rowYs[i] = y + margin end
 
     for _, v in pairs(menu.lineRenderViews) do
         if menu.renderLayout then pcall(function() menu.renderLayout:removeItem(v) end) end
