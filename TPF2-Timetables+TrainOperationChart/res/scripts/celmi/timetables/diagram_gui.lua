@@ -841,19 +841,70 @@ local function locateVehicle(ld, vehicle, now, yMap, keepSeg)
     return nil
 end
 
+-- same colors as the punctuality dots of the line list
+local LIVE_COLORS = { ontime = {1, 1, 1}, early = {0, 1, 0}, late = {1, 0, 0} }
+local LIVE_CLASSES = { "ontime", "early", "late" }
+
+-- The overlay's views in drawing order (later ones on top): the "now" line, whisker edges,
+-- whiskers per class, square edges, squares per class. Each has a fixed color and width,
+-- because the width applies to the whole view. A dark edge separates the marks from lines of
+-- the same color.
+local function liveViewSpecs(ctx)
+    local half = 4 * ctx.scale
+    local edge = 1.5 * ctx.scale
+    local specs = { { key = "now", color = {1, 1, 1, 0.35}, width = 1 } }
+    specs[#specs + 1] = { key = "wEdge", color = {0, 0, 0, 0.85}, width = 2 + 2 * edge }
+    for _, cls in ipairs(LIVE_CLASSES) do
+        local c = LIVE_COLORS[cls]
+        specs[#specs + 1] = { key = "w_" .. cls, color = {c[1], c[2], c[3], 0.9}, width = 2 }
+    end
+    specs[#specs + 1] = { key = "sEdge", color = {0, 0, 0, 0.85}, width = 2 * (half + edge), r = half + edge }
+    for _, cls in ipairs(LIVE_CLASSES) do
+        local c = LIVE_COLORS[cls]
+        specs[#specs + 1] = { key = "s_" .. cls, color = {c[1], c[2], c[3], 1}, width = 2 * half, r = half }
+    end
+    return specs
+end
+
 -- Live vehicle overlay: a "now" line and, for every vehicle of the displayed lines, a square at
 -- (now, position) plus a whisker back to where the timetable has it now (length = delay),
--- colored like the punctuality dots. Rebuilt every game second; drawn on top of the chart.
-local function drawLiveOverlay()
-    clearLiveViews()
+-- colored like the punctuality dots.
+-- The views are created once per chart refresh (rebuild = true, so they stay on top of the new
+-- line views) and cleared and refilled on the per-second updates.
+---@param rebuild boolean|nil
+local function drawLiveOverlay(rebuild)
     local ctx = menu.liveCtx
-    if not (ctx and menu.renderLayout and timetable.getShowVehicles()) then return end
+    if not (ctx and menu.renderLayout and timetable.getShowVehicles()) then
+        clearLiveViews()
+        return
+    end
+    local specs = liveViewSpecs(ctx)
+
+    if not rebuild and #menu.liveViews == #specs then
+        for _, v in ipairs(menu.liveViews) do v:clear() end
+    else
+        clearLiveViews()
+        for _, sp in ipairs(specs) do
+            local v = api.gui.comp.LineRenderView.new()
+            v:setMinimumSize(api.gui.util.Size.new(ctx.lw, ctx.lh))
+            v:setMaximumSize(api.gui.util.Size.new(ctx.lw, ctx.lh))
+            menu.renderLayout:addItem(v, 0.5, 0)
+            table.insert(menu.liveViews, v)
+        end
+    end
+    local views = {}
+    for i, sp in ipairs(specs) do
+        local v = menu.liveViews[i]
+        v:setColor(api.type.Vec4f.new(sp.color[1], sp.color[2], sp.color[3], sp.color[4]))
+        v:setWidth(sp.width)
+        views[sp.key] = { view = v, r = sp.r }
+    end
+
     local now = timetableHelper.getTime()
     local nowM = (now % 3600) / 60
     local tol = timetable.getPunctThreshold()
 
     local byClass = { ontime = {}, early = {}, late = {} }
-    local any = false
     for _, ld in pairs(displayedLines) do
         if ld.checked and ld.runs then
             for _, vehicle in pairs(timetableHelper.getVehiclesOnLine(ld.id)) do
@@ -861,35 +912,16 @@ local function drawLiveOverlay()
                 if okL and m and m.y >= 0 and m.y <= ctx.dh then
                     local cls = (m.delay > tol and "late") or (m.delay < -tol and "early") or "ontime"
                     table.insert(byClass[cls], m)
-                    any = true
                 end
             end
         end
     end
 
-    local function makeView(r, g, b, a, width)
-        local v = api.gui.comp.LineRenderView.new()
-        v:setMinimumSize(api.gui.util.Size.new(ctx.lw, ctx.lh))
-        v:setMaximumSize(api.gui.util.Size.new(ctx.lw, ctx.lh))
-        menu.renderLayout:addItem(v, 0.5, 0)
-        table.insert(menu.liveViews, v)
-        v:setColor(api.type.Vec4f.new(r, g, b, a))
-        v:setWidth(width)
-        return v
-    end
-
     local nowVisible = nowM >= ctx.tWin0 and nowM <= ctx.tWin1
+    local x = ctx.timeX(nowM)
     if nowVisible then
-        local x = ctx.timeX(nowM)
-        makeView(1, 1, 1, 0.35, 1):addLine(api.type.Vec2f.new(x, 0), api.type.Vec2f.new(x, ctx.dh))
+        views.now.view:addLine(api.type.Vec2f.new(x, 0), api.type.Vec2f.new(x, ctx.dh))
     end
-    if not any then return end
-
-    -- same colors as the punctuality dots of the line list; a dark edge separates the marks
-    -- from lines of the same color
-    local COLORS = { ontime = {1, 1, 1}, early = {0, 1, 0}, late = {1, 0, 0} }
-    local half = 4 * ctx.scale
-    local edge = 1.5 * ctx.scale
     local function drawWhiskers(v, markers)
         for _, m in ipairs(markers) do
             if math.abs(m.delay) >= 1 then
@@ -899,30 +931,18 @@ local function drawLiveOverlay()
         end
     end
     -- a filled square: one short, wide stroke
-    local function drawSquares(v, markers, r)
-        local x = ctx.timeX(nowM)
+    local function drawSquares(vs, markers)
         for _, m in ipairs(markers) do
-            v:addLine(api.type.Vec2f.new(x - r, m.y), api.type.Vec2f.new(x + r, m.y))
+            vs.view:addLine(api.type.Vec2f.new(x - vs.r, m.y), api.type.Vec2f.new(x + vs.r, m.y))
         end
     end
-
-    -- per pass: the edges of all vehicles first, then the colored marks on top
-    local wEdge = makeView(0, 0, 0, 0.85, 2 + 2 * edge)
-    for _, markers in pairs(byClass) do drawWhiskers(wEdge, markers) end
-    for cls, markers in pairs(byClass) do
-        if #markers > 0 then
-            local c = COLORS[cls]
-            drawWhiskers(makeView(c[1], c[2], c[3], 0.9, 2), markers)
-        end
-    end
-    if nowVisible then
-        local sEdge = makeView(0, 0, 0, 0.85, 2 * (half + edge))
-        for _, markers in pairs(byClass) do drawSquares(sEdge, markers, half + edge) end
-        for cls, markers in pairs(byClass) do
-            if #markers > 0 then
-                local c = COLORS[cls]
-                drawSquares(makeView(c[1], c[2], c[3], 1, 2 * half), markers, half)
-            end
+    for _, cls in ipairs(LIVE_CLASSES) do
+        local markers = byClass[cls]
+        drawWhiskers(views.wEdge.view, markers)
+        drawWhiskers(views["w_" .. cls].view, markers)
+        if nowVisible then
+            drawSquares(views.sEdge, markers)
+            drawSquares(views["s_" .. cls], markers)
         end
     end
 end
@@ -1348,7 +1368,7 @@ local function refreshDiagram()
 
     menu.liveCtx = { yMap = yMap, dw = dw, dh = dh, lw = lw_logical, lh = lh_logical, scale = scale,
         tWin0 = tWin0, tWin1 = tWin1, timeX = timeX, drawWrapped = drawWrappedSegment, keepSeg = keepSeg }
-    drawLiveOverlay()
+    drawLiveOverlay(true)
 
     dbgPrint("draw names: " .. table.concat(drawDebug, ", "))
 end
