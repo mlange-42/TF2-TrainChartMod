@@ -885,26 +885,43 @@ local function drawLiveOverlay()
     end
     if not any then return end
 
-    -- same colors as the punctuality dots of the line list
+    -- same colors as the punctuality dots of the line list; a dark edge separates the marks
+    -- from lines of the same color
     local COLORS = { ontime = {1, 1, 1}, early = {0, 1, 0}, late = {1, 0, 0} }
     local half = 4 * ctx.scale
+    local edge = 1.5 * ctx.scale
+    local function drawWhiskers(v, markers)
+        for _, m in ipairs(markers) do
+            if math.abs(m.delay) >= 1 then
+                local t1, t2 = math.min(now, now - m.delay), math.max(now, now - m.delay)
+                ctx.drawWrapped(v, t1, m.y, t2, m.y)
+            end
+        end
+    end
+    -- a filled square: one short, wide stroke
+    local function drawSquares(v, markers, r)
+        local x = ctx.timeX(nowM)
+        for _, m in ipairs(markers) do
+            v:addLine(api.type.Vec2f.new(x - r, m.y), api.type.Vec2f.new(x + r, m.y))
+        end
+    end
+
+    -- per pass: the edges of all vehicles first, then the colored marks on top
+    local wEdge = makeView(0, 0, 0, 0.85, 2 + 2 * edge)
+    for _, markers in pairs(byClass) do drawWhiskers(wEdge, markers) end
     for cls, markers in pairs(byClass) do
         if #markers > 0 then
             local c = COLORS[cls]
-            local wv = makeView(c[1], c[2], c[3], 0.9, 2)
-            for _, m in ipairs(markers) do
-                if math.abs(m.delay) >= 1 then
-                    local t1, t2 = math.min(now, now - m.delay), math.max(now, now - m.delay)
-                    ctx.drawWrapped(wv, t1, m.y, t2, m.y)
-                end
-            end
-            if nowVisible then
-                -- a filled square: one short, wide stroke
-                local sv = makeView(c[1], c[2], c[3], 1, 2 * half)
-                local x = ctx.timeX(nowM)
-                for _, m in ipairs(markers) do
-                    sv:addLine(api.type.Vec2f.new(x - half, m.y), api.type.Vec2f.new(x + half, m.y))
-                end
+            drawWhiskers(makeView(c[1], c[2], c[3], 0.9, 2), markers)
+        end
+    end
+    if nowVisible then
+        local sEdge = makeView(0, 0, 0, 0.85, 2 * (half + edge))
+        for _, markers in pairs(byClass) do drawSquares(sEdge, markers, half + edge) end
+        for cls, markers in pairs(byClass) do
+            if #markers > 0 then
+                local c = COLORS[cls]
+                drawSquares(makeView(c[1], c[2], c[3], 1, 2 * half), markers, half)
             end
         end
     end
