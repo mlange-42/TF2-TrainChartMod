@@ -147,13 +147,11 @@ end
 
 local function saveConfig(cfg) timetable.setDiagramConfig(cfg or {}) end
 
+-- The line's color in the game. The color button of the line list sets the game color too,
+-- so the colors saved in the config are not read anymore (they were saved for every line,
+-- so the fallback palette overrode the game colors).
 local function getLineColor(lineID)
-    local cfg = getConfig()
-    if cfg.lineColors and cfg.lineColors[tostring(lineID)] then
-        local c = cfg.lineColors[tostring(lineID)]
-        return api.type.Vec4f.new(c[1], c[2], c[3], c[4])
-    end
-    return nil
+    return timetableHelper.getLineColourVec4(lineID)
 end
 
 local function saveLineColor(lineID, color)
@@ -391,10 +389,9 @@ local function getAllTimetableData()
         if stCount > 0 or wpCount > 0 then
             dbgPrint("LINE " .. tostring(lineID) .. " '" .. lineInfo.name .. "' stops=" .. #stops .. " stations=" .. stCount .. " waypoints=" .. wpCount)
         end
-        local savedColor = getLineColor(lineID)
         local lineData = {
             id = lineID, name = lineInfo.name, stations = {},
-            color = savedColor or getColor(#data + 1),
+            color = getLineColor(lineID) or getColor(#data + 1),
             selected = false, bold = false, checked = true,
         }
         lineData.legTimes, lineData.legDistances = timetableHelper.getLegEstimates(lineID)
@@ -1224,7 +1221,7 @@ local function refreshDiagram()
         local lv = menu.lineRenderViews[li + 1]
         if lv then
             lv:setColor(ld.color)
-            local lw = ld.bold and 3 or 1.5
+            local lw = ld.bold and 2 or 1
             -- 按行程推算逐车次跟踪：从首个有时刻的停靠站的每个槽位出发，按区间运行时间估算
             -- 到达下一站的时刻并选取最接近的槽位（而非按槽位序号配对）。
             -- 交路线：末站为换乘站，列车到站即换下一交路，不画本线发车，也不折返/循环闭合。
