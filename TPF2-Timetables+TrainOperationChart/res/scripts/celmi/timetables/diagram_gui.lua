@@ -1565,11 +1565,14 @@ rebuildPresetList = function()
 
                 local lb = api.gui.comp.TextView.new(st.name)
                 lb:setStyleClassList({"timetable-mono-sc"})
-
-                local sld = api.gui.comp.TextView.new(D.sort)
-                sld:setStyleClassList({"timetable-mono-sc"})
+                -- Gravity -1 = left (0 centres the text, see the timetable window's buttons)
+                lb:setGravity(-1, 0.5)
 
                 local sp = api.gui.comp.DoubleSpinBox.new()
+                pcall(function() sp:setTooltip(D.sort) end)
+                -- Fixed width, otherwise the dial stretches to fill the row.
+                sp:setMinimumSize(api.gui.util.Size.new(40, 0))
+                sp:setMaximumSize(api.gui.util.Size.new(40, 100))
                 sp:setMinimum(1, false)
                 sp:setMaximum(256, false)
                 local sv = (type(st.sort) == "number" and st.sort >= 1 and st.sort <= 256) and st.sort or 256
@@ -1587,7 +1590,9 @@ rebuildPresetList = function()
                     end
                 end)
 
-                sl:addItem(cb); sl:addItem(lb); sl:addItem(sld); sl:addItem(sp)
+                -- Sort dial before the name: a vertical scroll bar then only covers the end of
+                -- long names, not the dial, and the dials line up.
+                sl:addItem(cb); sl:addItem(sp); sl:addItem(lb)
                 nl:addItem(sr)
                 table.insert(rows, {comp = sr, ck = ck, sp = sp, st = st})
             end
