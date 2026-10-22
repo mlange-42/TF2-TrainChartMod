@@ -1222,6 +1222,12 @@ local function refreshDiagram()
         if lv then
             lv:setColor(ld.color)
             local lw = ld.bold and 2 or 1
+            lv:setWidth(lw)
+            -- The width is a property of the whole view (the last setWidth wins), so the stop
+            -- markers, drawn wider, go into a view of their own.
+            local cv = makeLRV()
+            cv:setColor(ld.color)
+            cv:setWidth(lw + 1)
             -- 按行程推算逐车次跟踪：从首个有时刻的停靠站的每个槽位出发，按区间运行时间估算
             -- 到达下一站的时刻并选取最接近的槽位（而非按槽位序号配对）。
             -- 交路线：末站为换乘站，列车到站即换下一交路，不画本线发车，也不折返/循环闭合。
@@ -1258,7 +1264,6 @@ local function refreshDiagram()
                     polylines[#polylines + 1] = cur
                 end
 
-                lv:setWidth(lw)
                 for _, pl in ipairs(polylines) do
                     for i = 1, #pl - 1 do
                         if keepSeg(pl[i].y, pl[i + 1].y) then
@@ -1266,7 +1271,6 @@ local function refreshDiagram()
                         end
                     end
                 end
-                lv:setWidth(lw + 2)
                 for _, pl in ipairs(polylines) do
                     for __, p in pairs(pl) do
                         local pm = (p.uw % 3600) / 60
@@ -1274,8 +1278,8 @@ local function refreshDiagram()
                         -- 时间窗口 + 车站窗口双重过滤：窗口外（含外推 Y 越界）的十字标记不画
                         if pm >= tWin0 and pm <= tWin1 and ny >= 0 and ny <= dh then
                             local nx = timeX(pm)
-                            lv:addLine(api.type.Vec2f.new(nx - 2, ny), api.type.Vec2f.new(nx + 2, ny))
-                            lv:addLine(api.type.Vec2f.new(nx, ny - 2), api.type.Vec2f.new(nx, ny + 2))
+                            cv:addLine(api.type.Vec2f.new(nx - 2, ny), api.type.Vec2f.new(nx + 2, ny))
+                            cv:addLine(api.type.Vec2f.new(nx, ny - 2), api.type.Vec2f.new(nx, ny + 2))
                         end
                     end
                 end
