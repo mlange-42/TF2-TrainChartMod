@@ -1055,6 +1055,20 @@ timetableTests[#timetableTests + 1] = function()
     mockArrival, mockTime = nil, h + 18 * 60
     assert(tt.waitingRequired("V1") == true, "no doorsTime: 18:00 is early for 20/21")
 
+    -- Holding point off: late beyond tolerance departs right away, early still waits.
+    assert(tt.getHoldLateEnabled(100, 1) == true, "holding point defaults to on")
+    tt.setHoldLateEnabled(100, 1, false)
+    assert(tt.getHoldLateEnabled(100, 1) == false, "holding point round trip")
+    assert(tt.getTimetableObject()["100"].stations[1].holdLate == false, "stored on the station entry")
+    reset()
+    mockArrival, mockTime = h + 11 * 60 + 30, h + 17 * 60
+    assert(tt.waitingRequired("V1") == false, "not a holding point: 6 min late must depart")
+    assert(forceCalls == 1, "release forces departure")
+    reset()
+    mockArrival, mockTime = h + 19 * 60, h + 19 * 60
+    assert(tt.waitingRequired("V1") == true, "not a holding point: early train still waits")
+    tt.setHoldLateEnabled(100, 1, true)
+
     _G.api = prevApi
     print("  OK: waitingRequired closest-slot matching (two slots)")
 end

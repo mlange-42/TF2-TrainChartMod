@@ -776,7 +776,8 @@ function timetable.waitingRequired(vehicle)
             releaseNow(true)
             return false
         end
-        if checkDelay and tolerance > 0 and time - missDep > tolerance then
+        if checkDelay and tolerance > 0 and time - missDep > tolerance
+           and timetable.getHoldLateEnabled(currentLine, currentStop) then
             -- 晚点超过判定标准：扣车到下一趟/下一周期（勾了 max 则到"到站+M"被 ① 强发）
             holdNow(timetable.getNextDeparture(constraints, time), true)
             return true
@@ -1161,6 +1162,25 @@ end
 function timetable.setForceDepartureEnabled(line, value)
     if timetableObject[tostring(line)] then
         timetableObject[tostring(line)].forceDeparture = value == true
+    end
+end
+
+-- Per-stop holding point: whether trains later than the delay tolerance are held at this stop
+-- until the next slot. Default true (old behaviour). When false, late trains depart right away;
+-- early trains still wait for their departure. Stored on the station entry, so it moves along
+-- with it in reconcileStationData.
+function timetable.getHoldLateEnabled(line, stationNumber)
+    local entry = timetableObject[tostring(line)]
+    local st = entry and entry.stations and entry.stations[stationNumber]
+    if not st or st.holdLate == nil then return true end
+    return st.holdLate == true
+end
+
+function timetable.setHoldLateEnabled(line, stationNumber, value)
+    local entry = timetableObject[tostring(line)]
+    local st = entry and entry.stations and entry.stations[stationNumber]
+    if st then
+        st.holdLate = value == true
     end
 end
 

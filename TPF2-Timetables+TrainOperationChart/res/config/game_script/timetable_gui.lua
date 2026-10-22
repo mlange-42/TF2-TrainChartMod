@@ -111,6 +111,8 @@ local UIStrings = {
 		separation = _("diagram_separation_i18n"),
 		generate = _("diagram_generate_i18n"),
 		force_departure = _("diagram_force_departure_i18n"),
+		hold_late = _("diagram_hold_late_i18n"),
+		hold_late_tooltip = _("diagram_hold_late_tooltip_i18n"),
 		min_wait = _("diagram_min_wait_i18n"),
 		max_wait = _("diagram_max_wait_i18n"),
 		help = _("diagram_help_i18n"),
@@ -1333,6 +1335,24 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
     local sepRow = api.gui.comp.Table.new(3, 'NONE')
     sepRow:addRow({api.gui.comp.TextView.new(UIStrings.separation), separationCombo, generateButton})
     menu.constraintTable:addRow({sepRow})
+
+    -- Holding point: whether trains beyond the delay tolerance are held here until the next slot.
+    -- Same checkbox pattern as the line control switches (Button with swapped image).
+    local holdImg = api.gui.comp.ImageView.new(
+        timetable.getHoldLateEnabled(lineID, stationID) and "ui/checkbox1.tga" or "ui/checkbox0.tga")
+    local holdBtn = api.gui.comp.Button.new(holdImg, true)
+    holdBtn:setStyleClassList({"timetable-avtivateTimetableButton"})
+    holdBtn:onClick(function()
+        local now = not timetable.getHoldLateEnabled(lineID, stationID)
+        timetable.setHoldLateEnabled(lineID, stationID, now)
+        pcall(function() holdImg:setImage(now and "ui/checkbox1.tga" or "ui/checkbox0.tga", false) end)
+        timetableChanged = true
+    end)
+    local holdLbl = api.gui.comp.TextView.new(UIStrings.hold_late)
+    holdLbl:setTooltip(UIStrings.hold_late_tooltip)
+    local holdRow = api.gui.comp.Table.new(2, 'NONE')
+    holdRow:addRow({holdLbl, holdBtn})
+    menu.constraintTable:addRow({holdRow})
 
     --setup header
     local headerTable = api.gui.comp.Table.new(4, 'NONE')
