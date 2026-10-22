@@ -1394,7 +1394,6 @@ function data()
                 if state == nil then state = {timetable = {}} end
                 state.timetable = param
                 timetable.setTimetableObject(state.timetable)
-                timetableChanged = true
             end
         end,
 
@@ -1404,7 +1403,15 @@ function data()
 
         load = function(loadedState)
             if loadedState == nil  or next(loadedState) == nil then  return end
-            if loadedState.timetable then
+            -- In the GUI thread, load runs every frame with the engine's last saved state.
+            -- Only accept it if it is not older than our local data: skip while local edits
+            -- are still unsent, or while the engine has not yet processed our last send
+            -- (snapshot revision < local revision). Otherwise a stale snapshot overwrites
+            -- local edits, and the next edit sends the reverted object to the engine.
+            local acceptTimetable = loadedState.timetable
+                and not (timetableChanged or _G._diagramForceSync)
+                and timetable.getRevision(loadedState.timetable) >= timetable.getRevision()
+            if acceptTimetable then
                 timetable.setTimetableObject(loadedState.timetable)
             end
 
@@ -1416,7 +1423,7 @@ function data()
                 timetable.setDiagramConfig(loadedState.diagramConfig)
             end
 
-            if loadedState.timetable and loadedState.timetable._gwNames then
+            if acceptTimetable and loadedState.timetable._gwNames then
                 _G._gwNames = loadedState.timetable._gwNames
             end
 
@@ -1458,6 +1465,7 @@ function data()
             pcall(function() timetableGUI.updatePunctuality() end)
             if timetableChanged or _G._diagramForceSync then
                 _G._diagramForceSync = nil
+                timetable.bumpRevision()
                 pcall(function() game.interface.sendScriptEvent("timetableUpdate", "", timetable.getTimetableObject()) end)
                 timetableChanged = false
             end
