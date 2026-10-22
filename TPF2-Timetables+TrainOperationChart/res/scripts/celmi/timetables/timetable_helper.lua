@@ -445,7 +445,9 @@ function timetableHelper.getLegTimes(line)
     end
 end
 
-local function getEntityPosition(entity)
+---@param entity number station group or station
+-- returns x, y of the entity (station group: its first station), or nil
+function timetableHelper.getEntityPosition(entity)
     local ok, e = pcall(function() return game.interface.getEntity(entity) end)
     if not (ok and e) then return nil end
     local p = e.position
@@ -460,24 +462,25 @@ local function getEntityPosition(entity)
 end
 
 ---@param line number | string
--- returns [seconds] travel time estimate of the leg leaving each stop, indexed by stop index.
+-- returns [seconds] travel time estimate of the leg leaving each stop, indexed by stop index,
+-- and [distance] straight-line distance of each leg (leg i: stop i -> stop i+1, last -> first).
 -- Uses the median of the measured sectionTimes of all vehicles on the line; legs no vehicle has
 -- driven yet get a share of the round trip estimated from the line frequency, split by distance.
 -- Entries may be nil where no estimate is possible.
-function timetableHelper.getLegTimeEstimates(line)
+function timetableHelper.getLegEstimates(line)
     if type(line) == "string" then line = tonumber(line) end
-    if not(type(line) == "number") then return {} end
+    if not(type(line) == "number") then return {}, {} end
     local okL, lineObject = pcall(function()
         return api.engine.getComponent(line, api.type.ComponentType.LINE)
     end)
-    if not (okL and lineObject and lineObject.stops) then return {} end
+    if not (okL and lineObject and lineObject.stops) then return {}, {} end
     local stationGroups = {}
     local n = 0
     for k, v in pairs(lineObject.stops) do
         stationGroups[k] = v.stationGroup
         if k > n then n = k end
     end
-    if n == 0 then return {} end
+    if n == 0 then return {}, {} end
 
     local vehicles = timetableHelper.getVehiclesOnLine(line)
     local samples = {}
@@ -508,7 +511,7 @@ function timetableHelper.getLegTimeEstimates(line)
     for i = 1, n do
         local sg = stationGroups[i]
         if type(sg) == "number" and sg > 0 then
-            local x, y = getEntityPosition(sg)
+            local x, y = timetableHelper.getEntityPosition(sg)
             if x then positions[i] = {x, y} end
         end
     end
@@ -520,7 +523,7 @@ function timetableHelper.getLegTimeEstimates(line)
         end
     end
 
-    return diagramTrains.estimateLegTimes(samples, distances, roundTrip, n)
+    return diagramTrains.estimateLegTimes(samples, distances, roundTrip, n), distances
 end
 
 -------------------------------------------------------------
