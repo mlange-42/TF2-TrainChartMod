@@ -1649,8 +1649,20 @@ local function persistConfig()
     if not ok then debugPrint("persistConfig ERROR: " .. tostring(err)) end
 end
 
-local function doRefreshData()
-    stationFilterText = ""
+-- Identifies the station/waypoint list (keys and names, order-independent), so that a
+-- refresh can tell whether the list in the station panel needs to be rebuilt.
+local function stationListSignature(list)
+    local keys = {}
+    for _, st in pairs(list) do
+        keys[#keys + 1] = stableKey(st.stopType, st.id, st.uniqueKey, st.entityId) .. "=" .. tostring(st.name)
+    end
+    table.sort(keys)
+    return table.concat(keys, "|")
+end
+
+---@param keepStationList boolean|nil auto refresh: keep the station panel (and its scroll
+---  position and filter) as it is unless the set of stations/waypoints changed
+local function doRefreshData(keepStationList)
     -- 记录刷新前线路勾选状态：getAllTimetableData 会重建 allLines（默认全勾选），
     -- 刷新后恢复，保证"刚才勾选/取消勾选的线路"在刷新后不消失。
     local prevChecks = {}
@@ -1667,7 +1679,15 @@ local function doRefreshData()
         end
     end
     local lineDataList = getAllTimetableData()
-    allStations = getAllStationsFlat(lineDataList)
+    local newStations = getAllStationsFlat(lineDataList)
+    -- The rows of the station panel hold references to the allStations entries, so the old
+    -- entries are kept when the panel is not rebuilt.
+    local rebuildList = not keepStationList
+        or stationListSignature(newStations) ~= stationListSignature(allStations)
+    if rebuildList then
+        stationFilterText = ""
+        allStations = newStations
+    end
     allLines = lineDataList
     displayedLines = {}
     for _, ld in pairs(lineDataList) do
@@ -1687,7 +1707,7 @@ local function doRefreshData()
     if menu.renderLayout and menu.stationLabels and menu.timeBarTop then
         pcall(function() refreshDiagram() end)
     end
-    rebuildPresetList()
+    if rebuildList then rebuildPresetList() end
 end
 
 -- 应用"时间标签位置"设置：把图表区（ca，含站名标签+运行图）与时间标签条（顶部条/底部条）
@@ -2475,7 +2495,7 @@ function diagramGUI.showDiagram()
             if not _G._punctLastRefresh then _G._punctLastRefresh = t end
             if t - _G._punctLastRefresh >= 10 then
                 _G._punctLastRefresh = t
-                doRefreshData()
+                doRefreshData(true)
             end
         end)
     end)
