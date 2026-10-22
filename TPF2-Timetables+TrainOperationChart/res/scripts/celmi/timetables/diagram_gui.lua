@@ -127,6 +127,8 @@ local D = {
     settings_spacing_equal = _("diagram_settings_spacing_equal_i18n"),
     settings_spacing_distance = _("diagram_settings_spacing_distance_i18n"),
     settings_spacing_time = _("diagram_settings_spacing_time_i18n"),
+    settings_platforms = _("diagram_settings_platforms_i18n"),
+    settings_platforms_show = _("diagram_settings_platforms_show_i18n"),
     punctuality = _("diagram_punctuality_i18n"),
     punct_ontime = _("diagram_punct_ontime_i18n"),
     punct_early = _("diagram_punct_early_i18n"),
@@ -397,7 +399,7 @@ local function getAllTimetableData()
             local uk = tostring(stopInfo.id) .. "_" .. tostring(lineID)
             local entry = { id = stopInfo.id, entityId = stopInfo.entityId, uniqueKey = uk,
                 name = displayName, stopType = stopInfo.type, times = {},
-                gwKey = gk, stopIndex = stopInfo.stopIndex,
+                gwKey = gk, stopIndex = stopInfo.stopIndex, platform = stopInfo.platform,
                 isLineStop = stopInfo.type == "station" or stopInfo.parentStationGroup == nil }
             if stopInfo.type == "station" then
                 local ct = timetable.getConditionType(lineID, stopInfo.stopIndex)
@@ -1002,6 +1004,9 @@ local function refreshDiagram()
     if tlp == "bottom" or tlp == "both" then updateTimeBar(menu.timeBarBottom, false) end
 
     local drawDebug = {}
+    -- Platform labels, collected while drawing: {t = absolute seconds, y = px, text}
+    local showPlatforms = timetable.getShowPlatforms()
+    local platformLabels = {}
     if #displayedLines > 0 then
     for _ in pairs(displayedLines) do makeLRV() end
 
@@ -1070,6 +1075,10 @@ local function refreshDiagram()
                         end
                         if visit.dep then
                             table.insert(cur, {uw = visit.dep, y = y})
+                            if showPlatforms and st.platform then
+                                platformLabels[#platformLabels + 1] =
+                                    { t = (visit.arr + visit.dep) / 2, y = y, text = st.platform }
+                            end
                         end
                     end
                 end
@@ -1120,6 +1129,32 @@ local function refreshDiagram()
     bv:addLine(api.type.Vec2f.new(0, dh), api.type.Vec2f.new(dw, dh))
     bv:addLine(api.type.Vec2f.new(0, 0), api.type.Vec2f.new(0, dh))
     bv:addLine(api.type.Vec2f.new(dw, 0), api.type.Vec2f.new(dw, dh))
+
+    -- Platform numbers above the dwell segments. Drawn as line strokes in a line view of its
+    -- own (TextViews on top of the line views are not displayed); coordinates in rendered pixels.
+    if #platformLabels > 0 then
+        local pv = makeLRV()
+        pv:setColor(api.type.Vec4f.new(0.85, 0.85, 0.85, 1))
+        pv:setWidth(1)
+        local gh = 7 * scale
+        local seen = {}
+        for _, pl in ipairs(platformLabels) do
+            local m = (pl.t % 3600) / 60
+            if m >= tWin0 and m <= tWin1 and pl.y >= 0 and pl.y <= dh then
+                local tw = diagramLayout.textWidth(pl.text, gh)
+                local x = math.max(0, math.min(dw - tw, timeX(m) - tw / 2))
+                local y = pl.y - 3 * scale - gh
+                if y < 0 then y = pl.y + 3 * scale end
+                local key = math.floor(x) .. "_" .. math.floor(y) .. "_" .. pl.text
+                if not seen[key] then
+                    seen[key] = true
+                    for _, sg in ipairs(diagramLayout.textSegments(pl.text, x, y, gh)) do
+                        pv:addLine(api.type.Vec2f.new(sg[1], sg[2]), api.type.Vec2f.new(sg[3], sg[4]))
+                    end
+                end
+            end
+        end
+    end
 
     dbgPrint("draw names: " .. table.concat(drawDebug, ", "))
 end
@@ -2010,8 +2045,8 @@ function diagramGUI.showDiagram()
             local cc = api.gui.comp.Component.new("settingsContent")
             local cl = api.gui.layout.BoxLayout.new("VERTICAL")
             cc:setLayout(cl)
-            cc:setMinimumSize(api.gui.util.Size.new(320, 450))
-            cc:setMaximumSize(api.gui.util.Size.new(320, 450))
+            cc:setMinimumSize(api.gui.util.Size.new(320, 510))
+            cc:setMaximumSize(api.gui.util.Size.new(320, 510))
 
             local curAuto = timetable.getDiagramAutoRefresh()
             local curPos = timetable.getTimeLabelPos()
@@ -2026,6 +2061,7 @@ function diagramGUI.showDiagram()
             local selPunct = curPunct
             local selFilter = curFilter
             local selSpacing = timetable.getRowSpacing()
+            local selPlatforms = timetable.getShowPlatforms()
 
             local function makeSectionLabel(text)
                 local lbl = api.gui.comp.TextView.new(text)
@@ -2127,6 +2163,18 @@ function diagramGUI.showDiagram()
                 selSpacing = SPACING_VALUES[i + 1] or "equal"
             end)
 
+            -- Section 6: platform number labels above the dwell segments
+            cl:addItem(makeSectionLabel(D.settings_platforms))
+
+            local platCk = api.gui.comp.ImageView.new(selPlatforms and "ui/checkbox1.tga" or "ui/checkbox0.tga")
+            local platBtn = api.gui.comp.Button.new(platCk, true)
+            local platLbl = api.gui.comp.TextView.new(D.settings_platforms_show)
+            local platRow = api.gui.comp.Component.new("settingRowPlatforms")
+            local platRl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+            platRow:setLayout(platRl)
+            platRl:addItem(platBtn); platRl:addItem(platLbl)
+            cl:addItem(platRow)
+
             local btnRow = api.gui.comp.Component.new("settingBtns")
             local btnRl = api.gui.layout.BoxLayout.new("HORIZONTAL")
             btnRow:setLayout(btnRl)
@@ -2139,7 +2187,7 @@ function diagramGUI.showDiagram()
             settingsWinRef = w
             w:addHideOnCloseHandler()
             w:setMovable(true)
-            w:setSize(api.gui.util.Size.new(340, 490))
+            w:setSize(api.gui.util.Size.new(340, 550))
             w:setPosition(400, 300)
 
             autoBtn:onClick(function()
@@ -2152,6 +2200,10 @@ function diagramGUI.showDiagram()
                 pcall(function() autoCk:setImage("ui/checkbox0.tga", false) end)
                 pcall(function() manCk:setImage("ui/checkbox1.tga", false) end)
             end)
+            platBtn:onClick(function()
+                selPlatforms = not selPlatforms
+                pcall(function() platCk:setImage(selPlatforms and "ui/checkbox1.tga" or "ui/checkbox0.tga", false) end)
+            end)
             okBtn:onClick(function()
                 pcall(function() w:setVisible(false, false) end)
                 -- 点"确定"才应用设置并刷新运行图：
@@ -2161,6 +2213,7 @@ function diagramGUI.showDiagram()
                 -- 4) 准点判定阈值（重算晚点/正点/早点分类）
                 -- 5) 运行方向筛选（重绘折线：只画往上/往下/全部）
                 -- 6) 车站间距（重算各行纵坐标）
+                -- 7) platform number labels
                 local okApply, applyErr = pcall(function()
                     timetable.setDiagramAutoRefresh(selAuto)
                     timetable.setTimeLabelPos(selPos)
@@ -2168,6 +2221,7 @@ function diagramGUI.showDiagram()
                     timetable.setPunctThreshold(selPunct)
                     timetable.setPolylineFilter(selFilter)
                     timetable.setRowSpacing(selSpacing)
+                    timetable.setShowPlatforms(selPlatforms)
                     _G._diagramForceSync = true
                     applyTimeLabelPosition()
                     -- 布局切换（ca 重放/尺寸/时间条可见性）需要一帧让引擎重排收敛后再刷新——

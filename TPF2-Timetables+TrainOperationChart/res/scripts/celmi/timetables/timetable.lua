@@ -1166,6 +1166,18 @@ function timetable.setRowSpacing(v)
     _G._diagramRowSpacing = v
 end
 
+-- Chart: show platform numbers above the dwell segments. Default on.
+-- Persisted in timetableObject (saved with the game) + _G (survives module reloads).
+function timetable.getShowPlatforms()
+    if _G._diagramShowPlatforms ~= nil then return _G._diagramShowPlatforms == true end
+    return timetableObject._diagramShowPlatforms ~= false
+end
+
+function timetable.setShowPlatforms(v)
+    timetableObject._diagramShowPlatforms = v == true
+    _G._diagramShowPlatforms = v == true
+end
+
 function timetable.setHasTimetable(line, bool)
     if timetableObject[tostring(line)] then
         timetableObject[tostring(line)].hasTimetable = bool

@@ -63,6 +63,16 @@ tests[#tests + 1] = function()
     assert(y[1] == 200, "single row centered")
 end
 
+tests[#tests + 1] = function()
+    -- "1" is the two right segments; "1/2" has 2 + 1 + 5 segments and advances by glyph + gap
+    local segs = diagramLayout.textSegments("1", 10, 20, 8)
+    assert(#segs == 2, "segments " .. #segs)
+    for _, s in ipairs(segs) do assert(s[1] == 14 and s[3] == 14, "x " .. s[1]) end
+    assert(#diagramLayout.textSegments("1/2", 0, 0, 8) == 8)
+    assert(near(diagramLayout.textWidth("12", 10), 13))
+    assert(diagramLayout.textWidth("", 10) == 0)
+end
+
 return {
     test = function()
         for k, v in pairs(tests) do

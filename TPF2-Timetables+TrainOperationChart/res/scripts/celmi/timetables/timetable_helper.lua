@@ -804,6 +804,27 @@ function timetableHelper.getAllStations(line)
     end
 end
 
+-- Platform number(s) of a line stop as shown to the player (terminal index + 1), e.g. "2",
+-- or "2/3" if the stop has alternative terminals. nil if the stop has no terminal.
+---@param stop userdata Line.Stop
+---@return string|nil
+function timetableHelper.getStopPlatformString(stop)
+    local ok, terminal = pcall(function() return stop.terminal end)
+    if not (ok and type(terminal) == "number") then return nil end
+    local res = tostring(terminal + 1)
+    pcall(function()
+        local alts = stop.alternativeTerminals
+        if not alts then return end
+        for i = 1, #alts do
+            local alt = alts[i]
+            if alt and type(alt.terminal) == "number" and alt.terminal ~= terminal then
+                res = res .. "/" .. tostring(alt.terminal + 1)
+            end
+        end
+    end)
+    return res
+end
+
 ---@param line number | string
 -- returns [{id, name, type, stopIndex, flatIndex}] Array in sequential order.
 -- Stations and their attached waypoints are flattened into one sequential list:
@@ -858,6 +879,7 @@ function timetableHelper.getAllStops(line)
                 type = "station",
                 stopIndex = k,
                 flatIndex = flatIdx,
+                platform = timetableHelper.getStopPlatformString(v),
             }
 
             if v.waypoints then
