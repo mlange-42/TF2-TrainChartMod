@@ -1648,23 +1648,8 @@ local function getPlannedArrDep(lineID, stationNumber, actualArrTime)
     if ct ~= "ArrDep" then return nil, nil end
     local conds = timetable.getConditions(lineID, stationNumber, "ArrDep")
     if not conds or #conds == 0 then return nil, nil end
-    local bestArr, bestDep = nil, nil
-    local bestDist = math.huge
-    for _, c in ipairs(conds) do
-        local arr = (c[1] * 60 + c[2]) % 3600
-        local dep = (c[3] * 60 + c[4]) % 3600
-        -- 周期取"到达时刻离实际到达最近"的那一趟（与 waitingRequired 槽位分配一致）
-        local k = math.floor((actualArrTime - arr + 1800) / 3600)
-        local absArr = arr + 3600 * k
-        local absDep = dep + 3600 * k
-        if absDep < absArr then absDep = absDep + 3600 end
-        local dist = math.abs(actualArrTime - absArr)
-        if dist < bestDist then
-            bestDist = dist
-            bestArr, bestDep = absArr, absDep
-        end
-    end
-    return bestArr, bestDep
+    -- Same slot matching as waitingRequired (closest [arr, dep] interval).
+    return timetable.assignSlot(conds, actualArrTime)
 end
 
 -- 晚点/正点/早点判定：|diff|<=阈值 正点，正=晚 负=早。阈值 = 运行图设置"准点判定阈值"（秒，默认10）。

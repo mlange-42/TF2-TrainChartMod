@@ -952,6 +952,113 @@ timetableTests[#timetableTests + 1] = function()
     print("  OK: max wait refined semantics (wait-to-point / at-point force / late-fast plain / M cap)")
 end
 
+-- Closest-slot matching: the arrival is matched to the slot whose [arr, dep] interval is
+-- closest, so early vs. late is decided by the nearer slot boundary.
+timetableTests[#timetableTests + 1] = function()
+    package.loaded[".res.scripts.celmi.timetables.timetable"] = nil
+    local tt = require ".res.scripts.celmi.timetables.timetable"
+    local slots = { {10,0,11,0}, {20,0,21,0} }
+    local h = 3600 * 13
+    local function dep(ref) local _, d = tt.assignSlot(slots, ref) return d end
+
+    assert(dep(h + 12 * 60) == h + 11 * 60, "12:00 is late for slot 10/11")
+    assert(dep(h + 18 * 60) == h + 21 * 60, "18:00 is early for slot 20/21")
+    assert(dep(h + 10 * 60 + 30) == h + 11 * 60, "10:30 is inside slot 10/11")
+    assert(dep(h + 15 * 60 + 30) == h + 21 * 60, "tie at the midpoint prefers the later slot")
+    assert(dep(h + 40 * 60) == h + 21 * 60, "40:00 is late for slot 20/21")
+    assert(dep(h + 46 * 60) == h + 60 * 60 + 11 * 60, "46:00 is early for 10/11 of the next hour")
+    -- Slot crossing the hour: arr 58:00, dep 02:00
+    local a, d = tt.assignSlot({ {58,0,2,0} }, h + 60)
+    assert(a == h - 120 and d == h + 120, "slot across the hour boundary")
+
+    assert(tt.getNextDeparture(slots, h + 12 * 60) == h + 21 * 60, "next departure after 12:00")
+    assert(tt.getNextDeparture(slots, h + 21 * 60) == h + 60 * 60 + 11 * 60, "next departure is strictly after")
+    print("  OK: assignSlot / getNextDeparture")
+end
+
+-- waitingRequired with two slots per hour (10/11 and 20/21), tolerance 5 min.
+timetableTests[#timetableTests + 1] = function()
+    local h = 3600 * 13
+    local mockTime = h
+    local mockArrival = nil
+    local forceCalls = 0
+    package.loaded["celmi/timetables/timetable_helper"] = {
+        getTime = function() return mockTime end,
+        getCurrentLine = function() return 100 end,
+        getCurrentStation = function() return 1 end,
+        getTimeUntilDeparture = function() return 3 end,
+        getStationID = function() return 1001 end,
+        forceDeparture = function() forceCalls = forceCalls + 1 end,
+    }
+    local prevApi = _G.api
+    _G.api = {
+        engine = {
+            entityExists = function() return true end,
+            getComponent = function(id, ctype)
+                if ctype == 70 and mockArrival then
+                    return { doorsTime = mockArrival * 1000000 }
+                end
+                return nil
+            end,
+        },
+        type = { ComponentType = { LINE = 60, TRANSPORT_VEHICLE = 70 } },
+    }
+    package.loaded[".res.scripts.celmi.timetables.timetable"] = nil
+    local tt = require ".res.scripts.celmi.timetables.timetable"
+    tt.setDelayTolerance(300)
+    tt.setTimetableObject({ ["100"] = { hasTimetable = true, stations = { [1] = { stationID = 1001,
+        conditions = { type = "ArrDep", ArrDep = { {10,0,11,0}, {20,0,21,0} } } } } } })
+    local function reset() tt.setCurrentlyWaiting({}) forceCalls = 0 end
+
+    -- Early for slot 20/21 at 19:00 (8 min after 11:00): must wait, was released before.
+    reset()
+    mockArrival, mockTime = h + 19 * 60, h + 19 * 60
+    assert(tt.waitingRequired("V1") == true, "19:00 is early for 20/21 and must wait")
+    mockTime = h + 20 * 60 + 59
+    assert(tt.waitingRequired("V1") == true, "still waiting before 21:00")
+    mockTime = h + 21 * 60
+    assert(tt.waitingRequired("V1") == false, "released at 21:00")
+    assert(forceCalls == 1, "release at the departure point forces departure")
+
+    -- Late within tolerance for slot 10/11.
+    reset()
+    mockArrival, mockTime = h + 13 * 60, h + 13 * 60 + 30
+    assert(tt.waitingRequired("V1") == false, "13:00 is 2 min late for 10/11 and must leave")
+
+    -- Late beyond tolerance (arrives 11:30, leaves loading at 17:00): held until 21:00,
+    -- and the decision stays fixed while waiting.
+    reset()
+    mockArrival, mockTime = h + 11 * 60 + 30, h + 17 * 60
+    assert(tt.waitingRequired("V1") == true, "6 min late must be held to the next slot")
+    mockTime = h + 20 * 60
+    assert(tt.waitingRequired("V1") == true, "held train keeps waiting for 21:00")
+    mockTime = h + 21 * 60 + 1
+    assert(tt.waitingRequired("V1") == false, "held train released at the next departure")
+
+    -- Slow loading does not move the train to another slot: arrived 10:30 (on time),
+    -- doors close at 16:30 (past the midpoint) -> late for 10/11 by 5:30 -> held to 21:00.
+    reset()
+    mockArrival, mockTime = h + 10 * 60 + 30, h + 16 * 60 + 30
+    assert(tt.waitingRequired("V1") == true, "on-time arrival with slow loading counts against 10/11")
+    assert(tt.getCurrentlyWaiting()["100"].stations[1].currentlyWaiting["V1"].dep == h + 21 * 60,
+        "held until 21:00")
+
+    -- A hold left over from an earlier visit is ignored on the next arrival.
+    reset()
+    tt.getCurrentlyWaiting()["100"] = { stations = { [1] = { outboundTime = {}, currentlyWaiting = {
+        V1 = { type = "ArrDep", arrivalTime = h - 3600 + 19 * 60, dep = h - 3600 + 21 * 60, late = false } } } } }
+    mockArrival, mockTime = h + 19 * 60, h + 19 * 60
+    assert(tt.waitingRequired("V1") == true, "stale hold must not release an early train")
+
+    -- Without an arrival time the current time is used as reference.
+    reset()
+    mockArrival, mockTime = nil, h + 18 * 60
+    assert(tt.waitingRequired("V1") == true, "no doorsTime: 18:00 is early for 20/21")
+
+    _G.api = prevApi
+    print("  OK: waitingRequired closest-slot matching (two slots)")
+end
+
 return {
     test = function()
         for k,v in pairs(timetableTests) do
