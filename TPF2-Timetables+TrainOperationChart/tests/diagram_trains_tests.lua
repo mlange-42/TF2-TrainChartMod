@@ -167,6 +167,16 @@ tests[#tests + 1] = function()
 end
 
 tests[#tests + 1] = function()
+    -- two slots at A: the run starting at 01:00 ends back at A on the 31:00 slot. That last
+    -- visit must not hide the run that starts at 31:00.
+    local st = { station(1, "A", {{0, 0, 1, 0}, {30, 0, 31, 0}}), station(2, "B", {{10, 0, 11, 0}, {40, 0, 41, 0}}) }
+    local runs = diagramTrains.buildRuns(st, { 540, 1140 })
+    assert(runs[1][#runs[1]].dep % 3600 == 1860, "first run ends on the 31:00 slot")
+    local leg = diagramTrains.legVisits(runs, st, 1, 1860)
+    assert(leg and #leg == 2 and leg[2].flatIdx == 2 and leg[2].arr == 2400, "leg of the run starting at 31:00")
+end
+
+tests[#tests + 1] = function()
     local pts = { {t = 100, y = 0}, {t = 200, y = 50}, {t = 200, y = 50}, {t = 300, y = 100} }
     local y, d = diagramTrains.trainOnLeg(pts, 150, 0)
     assert(y == 25 and d == 0, "on time, halfway along the first segment")

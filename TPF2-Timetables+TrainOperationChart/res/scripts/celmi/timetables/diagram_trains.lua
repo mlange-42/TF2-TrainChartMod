@@ -254,7 +254,8 @@ function diagramTrains.legVisits(runs, stations, flatIdx, plDep)
                         dep = w.dep and w.dep + shift }
                     if stations[w.flatIdx].isLineStop then return res end
                 end
-                return nil
+                -- the last visit of a run (back at its start stop) has a departure too, but no
+                -- leg after it: keep looking for the run that starts with this departure
             end
         end
     end
