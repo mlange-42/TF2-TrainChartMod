@@ -2458,7 +2458,7 @@ function diagramGUI.showDiagram()
             local spacingCurIdx = 0
             for i, v in ipairs(SPACING_VALUES) do if v == selSpacing then spacingCurIdx = i - 1 end end
             makeComboRow("", "settingRowSpacing", SPACING_ITEMS, spacingCurIdx, function(i)
-                selSpacing = SPACING_VALUES[i + 1] or "equal"
+                selSpacing = SPACING_VALUES[i + 1] or "distance"
             end)
 
             -- Section 6: platform number labels above the dwell segments
