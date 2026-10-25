@@ -15,6 +15,9 @@ diagramTrains.median = median
 
 ---Estimates the travel time of each leg of a line.
 ---Leg i is the leg leaving stop i (stop i -> stop i+1, the last stop -> stop 1).
+---Unmeasured legs get the average pace (seconds per distance) of the measured legs times their
+---distance. Only if no pace is available, the round trip time left over by the measured legs is
+---split across them by distance; the round trip includes dwell times, so this is a rough guess.
 ---@param samples table [stopIndex] = {seconds, ...} measured sectionTimes of all vehicles (> 0 only)
 ---@param distances table [stopIndex] = distance of leg i, or nil if unknown
 ---@param roundTrip number|nil estimated round trip time in seconds (from line frequency)
@@ -24,16 +27,36 @@ function diagramTrains.estimateLegTimes(samples, distances, roundTrip, n)
     local res = {}
     local known = 0
     local unknown = {}
+    local tPaced, dPaced = 0, 0
     for i = 1, n do
         local m = samples[i] and median(samples[i])
         if m then
             res[i] = m
             known = known + m
+            local d = distances and distances[i]
+            if d and d > 0 then tPaced = tPaced + m; dPaced = dPaced + d end
         else
             unknown[#unknown + 1] = i
         end
     end
-    if #unknown == 0 or not roundTrip or roundTrip <= 0 then return res end
+    if #unknown == 0 then return res end
+
+    if dPaced > 0 then
+        -- Legs without a distance get the mean distance of all legs with one.
+        local dSum, dCount = 0, 0
+        for i = 1, n do
+            local d = distances[i]
+            if d and d > 0 then dSum = dSum + d; dCount = dCount + 1 end
+        end
+        local pace = tPaced / dPaced
+        for _, i in ipairs(unknown) do
+            local d = distances[i]
+            res[i] = pace * ((d and d > 0) and d or dSum / dCount)
+        end
+        return res
+    end
+
+    if not roundTrip or roundTrip <= 0 then return res end
     local remaining = roundTrip - known
     if remaining <= 0 then return res end
 
