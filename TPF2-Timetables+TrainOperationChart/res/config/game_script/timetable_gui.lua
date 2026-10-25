@@ -995,7 +995,10 @@ function timetableGUI.fillStationTable(index, bool)
     local header4 = api.gui.comp.TextView.new("")
     menu.stationTable:setHeader({header1,header2, header3, header4})
 
-    local stationLegTime = timetableHelper.getLegTimes(lineID)
+    -- Median leg times over all vehicles, as used for the operation chart; unmeasured legs
+    -- hold a frequency-based estimate and are marked with "~".
+    local okLE, stationLegTime, legDistances, legMeasured = pcall(timetableHelper.getLegEstimates, lineID)
+    if not okLE then stationLegTime, legMeasured = {}, {} end
     menu.allStops = timetableHelper.getAllStops(lineID)
 
     -- 为路径点覆盖自定义名称（全局名优先；旧存档 per-line 名仅作一次性迁移来源）
@@ -1056,8 +1059,12 @@ function timetableGUI.fillStationTable(index, bool)
         stationName:setName("stationName")
 
         local jurneyTime
-        if stopInfo.type == "station" and stationLegTime and stationLegTime[stopInfo.stopIndex] then
-            jurneyTime = api.gui.comp.TextView.new(UIStrings.journey_time .. ": " .. os.date('%M:%S', stationLegTime[stopInfo.stopIndex]))
+        local legTime = stopInfo.type == "station" and stationLegTime[stopInfo.stopIndex]
+        if legTime then
+            local s = math.floor(legTime + 0.5)
+            local prefix = legMeasured[stopInfo.stopIndex] and "" or "~"
+            jurneyTime = api.gui.comp.TextView.new(UIStrings.journey_time .. ": " .. prefix
+                .. string.format("%02d:%02d", math.floor(s / 60), s % 60))
         elseif stopInfo.type == "waypoint" then
             jurneyTime = api.gui.comp.TextView.new(UIStrings.passing_point)
         else
