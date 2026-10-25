@@ -139,9 +139,15 @@ end
 ---@param line number
 -- returns [ vehicle:Number ]
 function timetableHelper.getVehiclesOnLine(line)
-    local ok, res = pcall(_lineVehicles, line)
-    if ok and res then return res end
-    return {}
+    local ok, vec = pcall(_lineVehicles, line)
+    -- Copy into a Lua table: the engine vector is only referenced by the iterator state of a
+    -- `for ... in pairs(getVehiclesOnLine(...))` loop, so the GC can free it mid-loop, and the
+    -- iterator then reads freed memory (native crash, not catchable by pcall).
+    local res = {}
+    if ok and vec then
+        for i = 1, #vec do res[i] = vec[i] end
+    end
+    return res
 end
 
 ---@param vehicle number | string

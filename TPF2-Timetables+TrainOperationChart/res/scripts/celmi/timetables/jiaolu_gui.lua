@@ -402,6 +402,8 @@ rebuildConfigList = function()
         local rl = api.gui.layout.BoxLayout.new("HORIZONTAL")
         row:setLayout(rl)
         local tglIcon = api.gui.comp.TextView.new(isExpanded and "▽" or "▶")
+        -- the default UI font (Lato) has no triangles; the Noto font has
+        tglIcon:setStyleClassList({"timetable-mono-sc"})
         local tgl = api.gui.comp.Button.new(tglIcon, true)
         tgl:onClick(function()
             settingsState.expandedId = (settingsState.expandedId == cfg.id) and nil or cfg.id
