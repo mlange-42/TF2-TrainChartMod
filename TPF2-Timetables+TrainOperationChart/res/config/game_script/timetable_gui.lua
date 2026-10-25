@@ -1277,6 +1277,8 @@ end
 
 
 local SEPARATION_LIST = {30, 20, 15, 12, 10, 7.5, 6, 5, 4, 3, 2.5, 2, 1.5, 1.2, 1}
+-- Last chosen separation (0-based combo index), kept across constraint window rebuilds
+local selectedSeparationIdx = nil
 
 -- Adds the "Separation [interval] Generate" row to the constraint window.
 ---@param generate function(sep) writes the generated times (sep in minutes, divides 60);
@@ -1286,6 +1288,12 @@ function timetableGUI.addSeparationRow(lineID, generate)
     for _, sep in ipairs(SEPARATION_LIST) do
         separationCombo:addItem(string.format("%g min (%g/h)", sep, 60 / sep))
     end
+    if selectedSeparationIdx then
+        pcall(function() separationCombo:setSelected(selectedSeparationIdx, false) end)
+    end
+    separationCombo:onIndexChanged(function(i)
+        if i ~= nil and i >= 0 then selectedSeparationIdx = i end
+    end)
     separationCombo:setGravity(1, 0)
     local generateButton = api.gui.comp.Button.new(api.gui.comp.TextView.new(UIStrings.generate), true)
     generateButton:setGravity(1, 0)
