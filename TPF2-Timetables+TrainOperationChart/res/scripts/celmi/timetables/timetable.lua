@@ -561,47 +561,80 @@ end
 -- A carried delay older than this is ignored (vehicle stood in a depot, line was edited, ...).
 local VEHICLE_DELAY_MAX_AGE = 3 * 3600
 
+-- Slot claims older than this are dropped.
+local SLOT_CLAIM_MAX_AGE = 2 * 3600
+
 local function normalizeStopData(stopData)
     if type(stopData.currentlyWaiting) ~= "table" then stopData.currentlyWaiting = {} end
     if type(stopData.outboundTime) ~= "table" then stopData.outboundTime = {} end
+    if type(stopData.slotClaims) ~= "table" then stopData.slotClaims = {} end
+end
+
+-- All occurrences of the slots from the hour before to two hours after the given time,
+-- sorted by departure.
+local function slotOccurrences(constraints, time)
+    local list = {}
+    local base = math.floor(time / 3600)
+    for _, c in ipairs(constraints) do
+        local arrTime = (c[1] * 60 + c[2]) % 3600
+        local depTime = (c[3] * 60 + c[4]) % 3600
+        local dwell = (depTime - arrTime) % 3600
+        for k = base - 1, base + 2 do
+            local absArr = arrTime + 3600 * k
+            list[#list + 1] = { arr = absArr, dep = absArr + dwell }
+        end
+    end
+    table.sort(list, function(a, b) return a.dep < b.dep end)
+    return list
 end
 
 -- Matches a reference time (usually the vehicle's arrival) to the slot whose [arr, dep]
 -- interval is closest to it (distance 0 if inside). Before the departure the train counts
 -- as early/on time, after it as late. Ties prefer the later slot (wait rather than leave early).
+-- If isTaken is given and the matched slot is taken by another vehicle, the next free slot
+-- after it is used instead, so that two vehicles never run on the same slot.
 ---@param constraints table in format like: {{30,0,59,0},{9,0,59,0},...}
 ---@param ref number absolute time in seconds
+---@param isTaken function|nil isTaken(absDep) -> boolean
 ---@return number|nil absArr absolute arrival time of the matched slot
 ---@return number|nil absDep absolute departure time of the matched slot
-function timetable.assignSlot(constraints, ref)
-    local bestArr, bestDep, bestDist = nil, nil, math.huge
-    local base = math.floor(ref / 3600)
-    for _, c in ipairs(constraints) do
-        local arrTime = (c[1] * 60 + c[2]) % 3600
-        local depTime = (c[3] * 60 + c[4]) % 3600
-        local dwell = (depTime - arrTime) % 3600
-        for k = base - 1, base + 1 do
-            local absArr = arrTime + 3600 * k
-            local absDep = absArr + dwell
-            local dist = 0
-            if ref < absArr then
-                dist = absArr - ref
-            elseif ref > absDep then
-                dist = ref - absDep
-            end
-            if dist < bestDist or (dist == bestDist and absDep > bestDep) then
-                bestArr, bestDep, bestDist = absArr, absDep, dist
-            end
+function timetable.assignSlot(constraints, ref, isTaken)
+    local occ = slotOccurrences(constraints, ref)
+    local best, bestDist = nil, math.huge
+    for i, o in ipairs(occ) do
+        local dist = 0
+        if ref < o.arr then
+            dist = o.arr - ref
+        elseif ref > o.dep then
+            dist = ref - o.dep
+        end
+        -- Sorted by departure, so "<=" lets the later slot win ties.
+        if dist <= bestDist then
+            best, bestDist = i, dist
         end
     end
-    return bestArr, bestDep
+    if not best then return nil, nil end
+    if isTaken then
+        for i = best, #occ do
+            if not isTaken(occ[i].dep) then return occ[i].arr, occ[i].dep end
+        end
+    end
+    -- All taken (more vehicles than slots): share the closest one.
+    return occ[best].arr, occ[best].dep
 end
 
 -- First departure of any slot strictly after the given time.
+-- With isTaken, slots taken by another vehicle are skipped (unless all are taken).
 ---@param constraints table in format like: {{30,0,59,0},{9,0,59,0},...}
 ---@param time number absolute time in seconds
+---@param isTaken function|nil isTaken(absDep) -> boolean
 ---@return number|nil absDep
-function timetable.getNextDeparture(constraints, time)
+function timetable.getNextDeparture(constraints, time, isTaken)
+    if isTaken then
+        for _, o in ipairs(slotOccurrences(constraints, time)) do
+            if o.dep > time and not isTaken(o.dep) then return o.dep end
+        end
+    end
     local best = nil
     for _, c in ipairs(constraints) do
         local depTime = (c[3] * 60 + c[4]) % 3600
@@ -729,6 +762,25 @@ function timetable.waitingRequired(vehicle)
             end
         end
 
+        -- Slot claims: which vehicle runs on which departure at this stop (key = tostring(absDep)).
+        -- A slot claimed by another vehicle is skipped when matching, so that vehicles which are
+        -- bunched (e.g. after adding vehicles and slots to a line) spread out over the free slots
+        -- instead of chasing the same one.
+        local claims = stopData.slotClaims
+        for k in pairs(claims) do
+            local t = tonumber(k)
+            if not t or t < time - SLOT_CLAIM_MAX_AGE then claims[k] = nil end
+        end
+        local function slotTaken(dep)
+            local owner = claims[tostring(dep)]
+            if owner == nil or owner == vehicle then return false end
+            -- Already departed on it.
+            if dep <= time then return true end
+            -- Future slot: only while the owner is still held for it here.
+            local w = stopData.currentlyWaiting[owner]
+            return type(w) == "table" and w.dep == dep
+        end
+
         -- 释放动作统一出口：到点发车=true → 强发；false → 仅普通放行（引擎装完关门才走，不掐装卸）。
         -- refDep: the departure the train runs on; the delay against it is carried to the next stop.
         local function releaseNow(forceIt, refDep)
@@ -738,13 +790,13 @@ function timetable.waitingRequired(vehicle)
                 lineWaiting.vehicleDelay[vehicle] = {
                     delay = math.max(0, time - refDep), inDelay = carriedDelay, time = time,
                 }
+                claims[tostring(refDep)] = vehicle
             end
             if forceIt then timetableHelper.forceDeparture(vehicle) end
         end
         -- Holds the train until the given departure. The target is stored so that the decision
         -- stays fixed while the train waits (it is not re-matched on every tick).
-        -- slot = departure of the slot the train was matched to (differs from dep when it is
-        -- held for a later slot).
+        -- slot = departure of the slot the train runs on (only differs from dep in old saves).
         local function holdNow(dep, late, slot)
             local prev = stopData.currentlyWaiting[vehicle]
             stopData.currentlyWaiting[vehicle] = {
@@ -754,6 +806,7 @@ function timetable.waitingRequired(vehicle)
                 late = late,
                 slot = slot,
             }
+            if dep then claims[tostring(dep)] = vehicle end
         end
 
         -- missDep    = the departure that has been reached or missed (absolute seconds)
@@ -787,7 +840,7 @@ function timetable.waitingRequired(vehicle)
             elseif entry and entry.arrivalTime then
                 ref = entry.arrivalTime
             end
-            local _, slotDep = timetable.assignSlot(constraints, ref - carriedDelay)
+            local _, slotDep = timetable.assignSlot(constraints, ref - carriedDelay, slotTaken)
             if not slotDep then
                 releaseNow(false)
                 return false
@@ -817,7 +870,10 @@ function timetable.waitingRequired(vehicle)
         if checkDelay and tolerance > 0 and time - missDep > tolerance
            and timetable.getHoldLateEnabled(currentLine, currentStop) then
             -- 晚点超过判定标准：扣车到下一趟/下一周期（勾了 max 则到"到站+M"被 ① 强发）
-            holdNow(timetable.getNextDeparture(constraints, time), true, missDep)
+            -- The train moves to the next free slot and runs on it from now on (its delay is
+            -- measured against that slot), leaving the missed slot to nobody.
+            local nextDep = timetable.getNextDeparture(constraints, time, slotTaken)
+            holdNow(nextDep, true, nextDep)
             return true
         end
         -- 未设判定标准（无）或晚点在容差内：
@@ -901,6 +957,7 @@ function timetable.sanitizeCurrentlyWaiting()
                 if type(st) == "table" then
                     if type(st.currentlyWaiting) ~= "table" then st.currentlyWaiting = {} end
                     if type(st.outboundTime) ~= "table" then st.outboundTime = {} end
+                    if type(st.slotClaims) ~= "table" then st.slotClaims = {} end
                 end
             end
         end
