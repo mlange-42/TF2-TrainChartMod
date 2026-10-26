@@ -1,0 +1,48 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Lua ${{ matrix.lua-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The mod uses goto, so it needs Lua 5.2 or newer.
+        lua-version: ["5.2", "5.3", "5.4"]
+    defaults:
+      run:
+        working-directory: TPF2-Timetables+TrainOperationChart
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: leafo/gh-actions-lua@v11
+        with:
+          luaVersion: ${{ matrix.lua-version }}
+
+      - name: Syntax check
+        run: |
+          mapfile -t files < <(git ls-files '*.lua')
+          lua - "${files[@]}" <<'EOF'
+          local failed = false
+          for _, f in ipairs(arg) do
+            local ok, err = loadfile(f)
+            if ok then
+              print("OK    " .. f)
+            else
+              print("FAIL  " .. err)
+              failed = true
+            end
+          end
+          os.exit(failed and 1 or 0)
+          EOF
+
+      - name: Run tests
+        env:
+          LUA_PATH: "./?.lua;./res/scripts/?.lua;./tests/?.lua;;"
+        run: lua tests/main_tests.lua
