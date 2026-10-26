@@ -18,8 +18,14 @@ tests[#tests + 1] = function()
 end
 
 tests[#tests + 1] = function()
-    -- measured legs are kept, the remaining round trip is split by distance
-    local r = diagramTrains.estimateLegTimes({ [1] = {100, 120, 110} }, { [2] = 1000, [3] = 3000 }, 910, 3)
+    -- unmeasured legs get the pace of the measured legs, round trip is ignored
+    local r = diagramTrains.estimateLegTimes({ [1] = {100}, [2] = {300} },
+        { [1] = 1000, [2] = 1000, [3] = 500 }, 99999, 4)
+    assert(r[1] == 100 and r[2] == 300, "measured medians")
+    assert(r[3] == 100, "0.2 s per distance x 500, got " .. tostring(r[3]))
+    assert(math.abs(r[4] - 0.2 * 2500 / 3) < 1e-9, "mean distance for a leg without one, got " .. tostring(r[4]))
+    -- no pace (measured leg without distance): the remaining round trip is split by distance
+    r =diagramTrains.estimateLegTimes({ [1] = {100, 120, 110} }, { [2] = 1000, [3] = 3000 }, 910, 3)
     assert(r[1] == 110, "measured median")
     assert(r[2] == 200, "1/4 of the remaining 800s, got " .. tostring(r[2]))
     assert(r[3] == 600, "3/4 of the remaining 800s, got " .. tostring(r[3]))

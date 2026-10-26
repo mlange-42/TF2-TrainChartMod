@@ -452,25 +452,6 @@ function timetableHelper.getAllRailLines()
     return res
 end
 
----@param line number | string
--- returns [time: Number] Array indexed by station index in sec starting with index 1
-function timetableHelper.getLegTimes(line)
-    if type(line) == "string" then line = tonumber(line) end
-    if not(type(line) == "number") then return "ERROR" end
-    local vehicleLineMap = api.engine.system.transportVehicleSystem.getLine2VehicleMap()
-    if vehicleLineMap[line] == nil or vehicleLineMap[line][1] == nil then return {}end
-    local vehicle = vehicleLineMap[line][1]
-    local okVO, vehicleObject = pcall(function()
-        return api.engine.getComponent(vehicle, 70)
-    end)
-    if not okVO then return {} end
-    if vehicleObject and vehicleObject.sectionTimes then
-        return vehicleObject.sectionTimes
-    else
-        return {}
-    end
-end
-
 ---@param entity number station group or station
 -- returns x, y of the entity (station group: its first station), or nil
 function timetableHelper.getEntityPosition(entity)
@@ -514,6 +495,7 @@ end
 -- Uses the median of the measured sectionTimes of all vehicles on the line; legs no vehicle has
 -- driven yet get a share of the round trip estimated from the line frequency, split by distance.
 -- Entries may be nil where no estimate is possible.
+-- Third return value: [stopIndex] = true for legs whose estimate is a measured median.
 function timetableHelper.getLegEstimates(line)
     if type(line) == "string" then line = tonumber(line) end
     if not(type(line) == "number") then return {}, {} end
@@ -570,7 +552,9 @@ function timetableHelper.getLegEstimates(line)
         end
     end
 
-    return diagramTrains.estimateLegTimes(samples, distances, roundTrip, n), distances
+    local measured = {}
+    for i in pairs(samples) do measured[i] = true end
+    return diagramTrains.estimateLegTimes(samples, distances, roundTrip, n), distances, measured
 end
 
 -------------------------------------------------------------
