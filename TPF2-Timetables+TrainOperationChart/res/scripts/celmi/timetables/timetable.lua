@@ -155,6 +155,18 @@ function timetable.migrateNumberLineKeys()
     return report
 end
 
+-- Sync revision: bumped by the GUI thread each time it sends timetableObject to the engine.
+-- The GUI thread rejects engine snapshots with an older revision (they predate its own edits).
+function timetable.getRevision(t)
+    t = t or timetableObject
+    return (type(t) == "table" and type(t._rev) == "number") and t._rev or 0
+end
+
+function timetable.bumpRevision()
+    timetableObject._rev = timetable.getRevision() + 1
+    return timetableObject._rev
+end
+
 function timetable.getCurrentlyWaiting()
     return currentlyWaiting
 end
