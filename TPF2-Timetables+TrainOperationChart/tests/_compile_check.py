@@ -27,12 +27,15 @@ for path in files:
         failed += 1
         continue
     res = pcall(loadfn, src, path)
-    if isinstance(res, tuple):
-        ok = res[0]
-        detail = res[1] if len(res) > 1 and not ok else "syntax OK"
+    # pcall(load, ...) returns (true, chunk) on success, but (true, nil, message) on a
+    # syntax error, since load reports errors by return value rather than raising them.
+    if not isinstance(res, tuple):
+        res = (res,)
+    ok = bool(res[0]) and len(res) > 1 and res[1] is not None
+    if ok:
+        detail = "syntax OK"
     else:
-        ok = bool(res)
-        detail = "syntax OK" if ok else str(res)
+        detail = res[2] if len(res) > 2 else (res[1] if len(res) > 1 else str(res))
     if not ok:
         failed += 1
         print("COMPILE FAIL:", path)
