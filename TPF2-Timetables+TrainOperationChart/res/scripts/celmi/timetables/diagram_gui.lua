@@ -2,13 +2,13 @@ local timetable = require "celmi/timetables/timetable"
 local timetableHelper = require "celmi/timetables/timetable_helper"
 local diagramTrains = require "celmi/timetables/diagram_trains"
 local diagramLayout = require "celmi/timetables/diagram_layout"
--- 交路系统已独立为 TrainRoute mod：这里通过 _G._trainRouteDiagramHook 读取它的
--- getDiagramMode()/isConfigLine() 来决定"交路运行图模式"绘制；未安装 TrainRoute 时钩子为 nil，
--- 运行图按普通模式绘制（与无交路系统时一致）。
+-- The train rotation system is now the separate TrainRoute mod: _G._trainRouteDiagramHook exposes its
+-- getDiagramMode()/isConfigLine(), which decide whether to draw in "rotation diagram mode"; without TrainRoute installed the hook is nil
+-- and the diagram is drawn in normal mode (same as without a rotation system).
 
 local diagramGUI = {}
 
--- 交路运行图模式接口（由 TrainRoute mod 注册）：该线路是否为交路配置线且交路运行图开关打开
+-- Rotation diagram mode interface (registered by the TrainRoute mod): whether the line is a configured rotation line and the rotation diagram switch is on
 local function isRotationLine(lineId)
     local hook = _G._trainRouteDiagramHook
     if not hook then return false end
@@ -37,19 +37,19 @@ local currentPresetRef = nil
 local stationRowGroups = {}
 local localPresets = {}  -- {id = {id, name, stationData}, ...}, runtime source of truth
 local stationFilterText = ""
--- 新增预设后要把列表滚动到新预设表头（从视口顶部开始展示），rebuildPresetList 记录对应行
+-- After adding a preset, the list should scroll to the new preset's header (shown from the top of the viewport); rebuildPresetList records the row
 local pendingScrollPresetId = nil
 local pendingScrollPresetRow = nil
 
--- 前向声明：以下函数以赋值形式定义（xxx = function ... end），且可能在声明之前被
--- 其它函数的闭包引用。Lua 局部变量只在声明之后可见，不加前向声明会导致引用解析为全局 nil
--- （"attempt to call global 'xxx' (a nil value)"）。
+-- Forward declarations: the following functions are defined by assignment (xxx = function ... end) and may be referenced by
+-- closures of other functions before their definition. Lua locals are only visible after their declaration; without forward declarations the references resolve to a nil global
+-- ("attempt to call global 'xxx' (a nil value)").
 local rebuildPresetList
 local saveCurrentPreset
 
--- 组件名计数器：必须跨刷新周期唯一（AGENTS.md: removeItem 移除的组件名可能未被
--- 引擎即时释放，同名重建会冲突）。每次刷新创建站名/时间标签时递增，永不重复。
--- 存 _G 而非 local：模块级 local 不抗 Lua VM 重载，_G 可跨模块重载存活。
+-- Component name counter: must be unique across refresh cycles (AGENTS.md: names of components removed via removeItem may not be
+-- released by the engine immediately; recreating with the same name conflicts). Incremented for every station name/time label created on refresh, never repeats.
+-- Stored in _G rather than a local: module-level locals don't survive Lua VM reloads, _G survives module reloads.
 local function nextLabelName()
     if not _G._diagramLabelCounter then _G._diagramLabelCounter = 0 end
     _G._diagramLabelCounter = _G._diagramLabelCounter + 1
@@ -58,8 +58,8 @@ end
 
 local WINDOW_WIDTH = 1200
 local WINDOW_HEIGHT = 780
--- 标题栏实际高约 36px（2026-08-16 玩家日志实测：da 渲染高 930px / 1.25 = 744 = 780 - 36；
--- 旧值 30 会让 da/ca 高度按 750 估算，实际只有 744 → ca 与时间条重叠）
+-- The title bar is actually about 36px high (2026-08-16, measured from player logs: da rendered height 930px / 1.25 = 744 = 780 - 36;
+-- the old value 30 made the da/ca height estimate 750 while it was actually only 744 -> ca overlapped the time bar)
 local TITLE_BAR_H = 36
 local STATION_PANEL_WIDTH = 220
 local TIME_LABEL_HEIGHT = 22
@@ -79,10 +79,10 @@ local function getColor(index)
     return api.type.Vec4f.new(c[1], c[2], c[3], c[4])
 end
 
--- 错误日志：始终输出（仅出错时触发，性能无负担）
+-- Error log: always printed (only triggered on errors, no performance cost)
 local function debugPrint(msg) print("[DiagramGUI] " .. msg) end
--- 调试汇总日志：受 _G._diagramDebug 开关控制（默认关闭），避免每次刷新/保存的
--- 高频汇总日志对玩家造成日志刷屏与 I/O 负担。排查问题时在控制台 `_G._diagramDebug=true`。
+-- Debug summary log: controlled by the _G._diagramDebug switch (off by default), to avoid flooding the log and I/O
+-- with high-frequency summaries on every refresh/save. For troubleshooting, set `_G._diagramDebug=true` in the console.
 local function dbgPrint(msg)
     if _G._diagramDebug then print("[DiagramGUI] " .. msg) end
 end
@@ -244,8 +244,8 @@ local function savePresetsToTimetableObject()
     end
     local dp = to[host].dp
     if not dp then dp = {}; to[host].dp = dp end
-    -- 数据安全防御（2026-08-09 补）：内存中预设为空但存档已有预设（loadPresets 失败/模块重载等），
-    -- 拒绝写入空列表覆盖已保存配置，避免"存档铁路线配置被清空"。
+    -- Data safety guard (added 2026-08-09): presets in memory are empty but the save already has presets (loadPresets failed/module reload etc.);
+    -- refuse to overwrite the saved configuration with an empty list, so that "the saved railway line configuration gets wiped" can't happen.
     if #localPresets == 0 and dp.presetList and #dp.presetList > 0 then
         dbgPrint("savePresets: localPresets empty but save has presets, refusing to overwrite")
         return
@@ -289,13 +289,13 @@ local function savePresetsToTimetableObject()
     _G._diagramForceSync = true
 end
 
--- 预设车站清理（2026-08-16 方案定稿）：拆站后，预设 stationData 里该站的勾选/序号条目删除，
--- 其余站的条目原样保留、序号不动（预设按实体键 "s_<stationID>" 存储，与线路位置无关）。
--- 有效性判断用 entityExists（保守：实体暂未回收时保留——被删站不在 allStations 里本就不会被
--- 应用，无害；重建车站若复用实体 ID → entityExists true → 条目保留，同一位置视为同一站）。
--- 路径点条目（"wp_" 前缀）不在此清理范围。
--- 有删除时立即 savePresetsToTimetableObject() 写回存档（dp.presetList）+ 触发跨线程同步。
--- 返回清理条数。
+-- Preset station cleanup (2026-08-16 final design): after removing a station, its checkbox/sort number entry in the preset's stationData is deleted;
+-- entries of the other stations are kept as is, sort numbers unchanged (presets are stored by entity key "s_<stationID>", independent of the position in the line).
+-- Validity is checked with entityExists (conservative: kept while the entity isn't recycled yet -- a removed station isn't in allStations so it is never
+-- applied, harmless; if a rebuilt station reuses the entity ID -> entityExists true -> entry kept, same position treated as the same station).
+-- Waypoint entries ("wp_" prefix) are not cleaned up here.
+-- When something was deleted, savePresetsToTimetableObject() immediately writes back to the save (dp.presetList) + triggers cross-thread sync.
+-- Returns the number of removed entries.
 local function purgeDeletedStationsFromPresets()
     local removedTotal = 0
     for _, p in pairs(localPresets) do
@@ -370,8 +370,8 @@ local function getAllTimetableData()
     local data = {}
     for _, lineInfo in pairs(timetableHelper.getAllRailLines()) do
         local lineID = lineInfo.id
-        -- 运行图只显示铁路线（时刻表显示所有线路，故筛选只在运行图侧做）。
-        -- 用反向过滤：排除明确非铁路（公交/电车/水路/航空）的线；空线路保守保留，避免误删。
+        -- The diagram only shows rail lines (the timetable shows all lines, so filtering is done on the diagram side only).
+        -- Uses reverse filtering: exclude lines that are definitely non-rail (bus/tram/water/air); empty lines are kept conservatively to avoid wrongly removing them.
         local isNonRail = timetableHelper.lineHasType(lineID, "ROAD")
             or timetableHelper.lineHasType(lineID, "TRAM")
             or timetableHelper.lineHasType(lineID, "WATER")
@@ -522,11 +522,11 @@ local function getRelevantLines(selList)
             end
         end
     end
-    -- 车次排序：勾选置顶 + 线路名自然排序。
-    -- 1) 勾选的线路排最上面（用户需求：勾选后刷新全部上移）
-    -- 2) 线路名含"字母+数字"前缀（如 G123/G34）按 (字母, 数值) 比较 → G1,G2,G10,G21,G111
-    -- 3) 其余（含中文）按 UTF-8 码点稳定排序。中文按拼音首字母需内置数千字的拼音对照表，
-    --    TPF2 无此库，不做（这是"有难度只上移"里放弃的那部分）。
+    -- Line list sorting: ticked lines first + natural sort by line name.
+    -- 1) Ticked lines go to the top (user request: after ticking, a refresh moves them all up)
+    -- 2) Line names with a "letters+digits" prefix (e.g. G123/G34) compare by (letters, number) -> G1,G2,G10,G21,G111
+    -- 3) Everything else (including Chinese) is sorted stably by UTF-8 code point. Sorting Chinese by pinyin initials would need a built-in pinyin table of thousands of characters;
+    --    TPF2 has no such library, so it isn't done (this is the part dropped from "hard, so only move ticked lines up").
     local function lineSortKey(name)
         name = tostring(name or "")
         local prefix, num = name:match("^(%a+)(%d+)")
@@ -542,12 +542,12 @@ local function getRelevantLines(selList)
             if ka.p ~= kb.p then return ka.p < kb.p end
             if ka.n ~= kb.n then return ka.n < kb.n end
         elseif ka.p or kb.p then
-            -- 一个有字母/数字前缀、一个没有：有前缀的排前
+            -- One has a letter/digit prefix and the other doesn't: the one with the prefix comes first
             return ka.p ~= nil
         else
             if tostring(ka.s) ~= tostring(kb.s) then return tostring(ka.s) < tostring(kb.s) end
         end
-        -- 同名/同 key 兜底：按线路 ID 稳定
+        -- Same name/same key fallback: stable by line ID
         local na, nb = tonumber(a.id), tonumber(b.id)
         if na and nb then return na < nb end
         return tostring(a.id) < tostring(b.id)
@@ -590,10 +590,10 @@ local function createColorChooserButton(lineData, onSelected)
     return btn
 end
 
--- 按设置计算各行（排序组）的纵坐标：
---   equal    等距
---   distance 沿线路的站间直线距离（各线路、双向取平均），无线路经过的相邻行用两行车站的直线距离补
---   time     沿线路的区间运行时间估算（各线路、双向取平均），缺失的按距离换算补
+-- Compute the y coordinate of each row (sort group) according to the setting:
+--   equal    equal spacing
+--   distance straight-line distance between stations along the lines (averaged over lines and both directions); adjacent rows not served by any line use the straight-line distance between the two rows' stations
+--   time     estimated section running time along the lines (averaged over lines and both directions); missing ones are derived from distance
 local function computeRowYs(keyRow, sorts, labelGroups, h)
     local nRows = #sorts
     local mode = timetable.getRowSpacing()
@@ -634,8 +634,8 @@ local function computeRowYs(keyRow, sorts, labelGroups, h)
     return diagramLayout.rowYs(gaps, nRows, h)
 end
 
--- 缩放窗口：把整图的行位置（rowFracs，首行 1、末行 0）映射为纵坐标，使窗口首行 y = h、
--- 窗口末行 y = 0；窗口外的行按同一刻度外推（可能超出 [0,h]，由绘制时裁剪）。
+-- Zoom window: map the full chart's row positions (rowFracs, first row 1, last row 0) to y coordinates so that the window's first row is at y = h
+-- and its last row at y = 0; rows outside the window are extrapolated with the same scale (may exceed [0,h], clipped when drawing).
 local function windowRowYs(rowFracs, rWin0, rWinLen, h)
     local ys = {}
     local fLo, fHi = rowFracs[rWin0], rowFracs[rWin0 + rWinLen - 1]
@@ -649,9 +649,9 @@ local function windowRowYs(rowFracs, rWin0, rWinLen, h)
     return ys
 end
 
--- 运行图放大（2026-08-16 功能）：保持画布大小不变，改变绘制范围来放大运行图。
---   tStart/tLen = 时间窗口（分钟，0-60 内）；rStart/rLen = 车站行窗口（1-based 行排名）。
---   active=false → 完整视图（0-60 分、全部行）。关窗即重置（临时查看辅助，不持久化）。
+-- Diagram zoom (2026-08-16 feature): keeps the canvas size and changes the drawn range to zoom the diagram.
+--   tStart/tLen = time window (minutes, within 0-60); rStart/rLen = station row window (1-based row rank).
+--   active=false -> full view (0-60 minutes, all rows). Reset when the window is closed (temporary viewing aid, not persisted).
 local zoomState = {
     active = false,
     tStart = 0,
@@ -660,15 +660,15 @@ local zoomState = {
     rLen = 0,
 }
 
--- 各时间刻度对应的"时间区间"（窗口长度，分钟）下拉选项（用户定稿）
+-- Dropdown options for the "time range" (window length, minutes) per time scale (final user decision)
 local ZOOM_INTERVAL_OPTIONS = {
     [2] = {60, 30, 20, 10, 6},
     [5] = {60, 30, 20, 10},
     [10] = {60, 40, 30, 20},
 }
 
--- 设置/放大弹窗单例引用：重复点击只置顶/重显已打开的窗口，不重复创建（2026-08-16 反馈）。
--- isAttached() 检测窗口是否已被销毁（如重开运行图时被引擎清理）；setVisible(true,true) 重显/置顶。
+-- Singleton references to the settings/zoom popups: repeated clicks only raise/re-show the open window instead of creating another one (2026-08-16 feedback).
+-- isAttached() detects whether the window has been destroyed (e.g. cleaned up by the engine when reopening the diagram); setVisible(true,true) re-shows/raises it.
 local settingsWinRef = nil
 local zoomWinRef = nil
 local function reshowOrReset(winRef)
@@ -680,7 +680,7 @@ local function reshowOrReset(winRef)
     return true
 end
 
--- 当前选择（展开线路合并去重后的车站+路径点行）的唯一排序序号列表（升序）
+-- Sorted (ascending) list of unique sort numbers of the current selection (station + waypoint rows of the expanded lines, merged and deduplicated)
 local function computeSortRanks(selList)
     local labelGroups = {}
     local labelDedup = {}
@@ -699,7 +699,7 @@ local function computeSortRanks(selList)
     return sorts, labelGroups
 end
 
--- 缩放窗口钳制（选择变化/越界时）：窗口必须落在有效范围内；没有实际放大（全宽全行）则视为未激活。
+-- Clamp the zoom window (when the selection changes/out of range): the window must lie within the valid range; if it doesn't actually zoom (full width, all rows) it counts as inactive.
 local function clampZoom(totalRanks)
     if not zoomState.active then return end
     local tLen = zoomState.tLen
@@ -721,11 +721,11 @@ local function clampZoom(totalRanks)
     end
 end
 
--- 构建 Y 轴映射：所有选中行都有 Y 值（2026-08-16 放大功能）。
--- 行位置按"车站间距"设置计算（computeRowYs），再按缩放窗口映射（windowRowYs）；
--- 窗口外的行用同一窗口刻度外推，可能超出 [0,h]——
--- 折线段跨越车站窗口边界时由 drawClippedSegment 按窗口 Y 范围 [0,dh] 裁剪（横向截断点正常绘制，
--- 不再因窗口外站无 Y 值而整段断线）。非选中的跨线车站（uniqueKey 不在 map 里）仍断线（原行为）。
+-- Build the Y axis mapping: every selected row gets a Y value (2026-08-16 zoom feature).
+-- Row positions are computed according to the "station spacing" setting (computeRowYs), then mapped to the zoom window (windowRowYs);
+-- rows outside the window are extrapolated with the same window scale and may exceed [0,h] --
+-- polyline segments crossing the station window boundary are clipped by drawClippedSegment to the window's Y range [0,dh] (the horizontal cut point is drawn normally,
+-- so the line no longer breaks just because stations outside the window had no Y value). Unselected stations of through lines (uniqueKey not in the map) still break the line (original behavior).
 local function buildYMap(selList, groups, sorts, rWin0, rWinLen, h)
     local keyRow = {}
     for i, sv in ipairs(sorts) do
@@ -947,7 +947,7 @@ local function drawLiveOverlay(rebuild)
     end
 end
 
--- 清除运行图渲染区（折线视图 + 站名标签 + 时间标签），全部 pcall 保护。
+-- Clear the diagram render area (polyline view + station name labels + time labels), all protected by pcall.
 local function clearDiagramViews()
     if menu.renderLayout then
         for _, v in pairs(menu.lineRenderViews) do
@@ -963,7 +963,7 @@ local function clearDiagramViews()
         end
     end
     menu.stationLabelViews = {}
-    -- 时间标签条可能是顶部/底部两条（上下同时显示时都画）；各自清理
+    -- There may be two time label bars, top and bottom (both are drawn when shown at top and bottom); clear each
     for _, bar in ipairs({ menu.timeBarTop, menu.timeBarBottom }) do
         if bar and bar.layout then
             for _, oldCont in ipairs(bar.views or {}) do
@@ -980,18 +980,18 @@ local function refreshDiagram()
     if not menu.renderLayout then dbgPrint("refreshDiagram: no renderLayout"); return end
     local selList = getSelectedStationList()
     if #selList == 0 then
-        -- 勾选车站少于1个：不绘制，并清除残留的上一次运行图（含上一预设的折线/标签），
-        -- 避免展开空预设后仍显示过期图形造成误导。
+        -- Fewer than 1 station ticked: don't draw, and clear the leftover previous diagram (including the previous preset's polylines/labels),
+        -- so that expanding an empty preset doesn't show stale, misleading graphics.
         clearDiagramViews()
         dbgPrint("refreshDiagram: no stations selected, cleared")
         return
     end
 
-    -- LineRenderView 组件逻辑尺寸（会被引擎按 UI 缩放因子放大显示），
-    -- 但 addLine 用的是组件实际渲染像素坐标（受缩放影响），故绘制坐标需乘缩放因子：
-    -- 实际像素 = 逻辑像素 × scale，scale = renderArea实际尺寸 / 逻辑尺寸。
+    -- LineRenderView logical component size (displayed scaled up by the engine's UI scale factor),
+    -- but addLine uses the component's actual rendered pixel coordinates (affected by scaling), so drawing coordinates must be multiplied by the scale factor:
+    -- actual pixels = logical pixels x scale, scale = actual renderArea size / logical size.
     local lw_logical = WINDOW_WIDTH - STATION_PANEL_WIDTH - STATION_LABEL_WIDTH
-    -- 逻辑高随"时间标签位置"联动：上下同显时图表让出两条标签（menu.chartH 由 applyTimeLabelPosition 维护）
+    -- The logical height follows the "time label position": when shown at top and bottom, the chart gives up space for two label bars (menu.chartH is maintained by applyTimeLabelPosition)
     local lh_logical = menu.chartH or (WINDOW_HEIGHT - TITLE_BAR_H - TIME_LABEL_HEIGHT)
     local dw = lw_logical
     local dh = lh_logical
@@ -1002,11 +1002,11 @@ local function refreshDiagram()
             scale = rr.w / lw_logical
             dw = rr.w
             dh = rr.h
-            -- renderArea 可能因布局偏移超出窗口右缘/下缘被裁（右侧实测超 14px）。
-            -- 计算"窗口可见右边界 - renderArea 左缘"把 dw 收缩到窗口内，保证边框/
-            -- 折线/网格最右端都画在可见区域内、右下角四线对齐。
-            -- 时间标签切到"上"时 renderArea 下移，底部也可能超出窗口下缘（下边框消失），
-            -- 用同样的方法把 dh 收缩进窗口，并额外留底部安全边距（整体上移）。
+            -- renderArea may extend past the window's right/bottom edge due to layout offsets and get clipped (measured: 14px past the right edge).
+            -- Compute "visible right edge of the window - renderArea left edge" and shrink dw to fit inside the window, so that the right ends of the border/
+            -- polylines/grid are all drawn in the visible area and the four lines meet at the bottom right corner.
+            -- When time labels are switched to "top", renderArea moves down and its bottom may also extend past the window's bottom edge (bottom border disappears);
+            -- shrink dh into the window the same way, with an extra bottom safety margin (moves everything up).
             local winRect = menu.window and menu.window:getContentRect()
             if winRect and winRect.w > 0 and winRect.x + winRect.w > rr.x then
                 local visW = (winRect.x + winRect.w) - rr.x - 2
@@ -1017,9 +1017,9 @@ local function refreshDiagram()
                 visH = (winRect.y + winRect.h) - rr.y - 2
                 if visH > 0 and visH < dh then dh = visH end
             end
-            -- 时间标签在上方时，renderArea 下移、底部可能被窗口裁掉（下边框消失）。
-            -- 兜底：dh 再收缩一个底部安全边距（整体上移），让下边框远离组件底缘。
-            -- 时间标签在下方时保持 dh = rr.h 原样（底边框贴合组件底缘是正常状态）。
+            -- With time labels at the top, renderArea moves down and its bottom may be clipped by the window (bottom border disappears).
+            -- Fallback: shrink dh by an additional bottom safety margin (moves everything up), keeping the bottom border away from the component's bottom edge.
+            -- With time labels at the bottom, keep dh = rr.h as is (the bottom border touching the component's bottom edge is normal).
             if timetable.getTimeLabelPos() == "top" then
                 local bottomPad = 16
                 if dh > rr.h - bottomPad then dh = rr.h - bottomPad end
@@ -1029,12 +1029,12 @@ local function refreshDiagram()
     local sorts, groups = computeSortRanks(selList)
     local totalRanks = #sorts
     clampZoom(totalRanks)
-    -- 缩放窗口参数（未激活时 = 完整视图，与旧公式一致）
+    -- Zoom window parameters (when inactive = full view, same as the old formula)
     local tWin0 = zoomState.active and zoomState.tStart or 0
     local tWin1 = zoomState.active and (zoomState.tStart + zoomState.tLen) or 60
     local rWin0 = zoomState.active and zoomState.rStart or 1
     local rWinLen = zoomState.active and zoomState.rLen or totalRanks
-    local function timeX(m)  -- m = 分钟
+    local function timeX(m)  -- m = minutes
         return (m - tWin0) / (tWin1 - tWin0) * dw
     end
     -- Margin above the first and below the last row, so markers on those rows are not cut off.
@@ -1057,12 +1057,12 @@ local function refreshDiagram()
         return v
     end
 
-    -- 边框视图 bv 最后创建（叠在最上层），否则折线的十字标记会把边框线盖住。
-    -- 创建顺序：rv(网格,最底) → 折线(中层) → bv(边框,最顶)。
+    -- The border view bv is created last (on top), otherwise the polylines' cross markers cover the border lines.
+    -- Creation order: rv (grid, bottom) -> polylines (middle) -> bv (border, top).
     local rv = makeLRV()
     rv:setColor(api.type.Vec4f.new(0.5, 0.5, 0.5, 0.3))
     rv:setWidth(1)
-    -- 竖向时间参考线间隔 = 时间刻度设置（2/5/10 分钟，默认5）；窗口边界（0/60 或 tWin0/tWin1）由边框线覆盖。
+    -- Vertical time reference line interval = time scale setting (2/5/10 minutes, default 5); the window boundaries (0/60 or tWin0/tWin1) are covered by the border lines.
     local gridStep = timetable.getTimeScale()
     if gridStep ~= 2 and gridStep ~= 10 then gridStep = 5 end
     for m = math.ceil(tWin0 / gridStep) * gridStep, math.floor(tWin1 / gridStep) * gridStep, gridStep do
@@ -1083,15 +1083,15 @@ local function refreshDiagram()
         end
         menu.stationLabelViews = {}
         local labelH = 18
-        -- 顶部留白：最上面的车站 y=0，rectY 若 clamp 到 0 会贴住组件顶部、
-        -- 文字上半部分被标题栏/组件边界遮挡。整体下移留白让所有标签可见。
+        -- Top margin: the topmost station is at y=0; if rectY were clamped to 0 it would touch the top of the component,
+        -- and the upper half of the text would be hidden by the title bar/component edge. Move everything down by a margin so all labels are visible.
         local topPad = labelH / 2
         for idx = rWin0 + rWinLen - 1, rWin0, -1 do
             local sv = sorts[idx]
             local groupStations = groups[sv]
-            -- 该行的标签文本（用户定稿 2026-08-16）：有站 → 只显示站名；无站（纯路径点行）
-            -- → 显示路径点名（1~2 个全显示分多行、≥3 只显示第 1 个——稳定不随机）。
-            -- 路径点名去掉列表界面用的 "▶ " 前缀。
+            -- Label text of the row (final user decision 2026-08-16): with a station -> only the station name; without a station (pure waypoint row)
+            -- -> the waypoint name (1-2 shown on separate lines, >=3 only the first -- stable, not random).
+            -- Waypoint names have the "▶ " prefix used in the list UI removed.
             local rows = {}
             if groupStations then
                 local stName = nil
@@ -1106,8 +1106,8 @@ local function refreshDiagram()
                 if stName then
                     rows = { stName }
                 elseif #wpNames > 0 then
-                    -- 纯路径点行：只显示第 1 个路径点（用户 2026-08-16：两行标签在等距行距下
-                    -- 显示困难，改"只显示第一个"，稳定不随机）
+                    -- Pure waypoint row: only show the first waypoint (user 2026-08-16: two-line labels are hard to read with equal row spacing,
+                    -- so changed to "only show the first one", stable, not random)
                     rows = { wpNames[1] }
                 end
             end
@@ -1139,7 +1139,7 @@ local function refreshDiagram()
         dbgPrint("stationLabels: " .. #menu.stationLabelViews .. " items, sorts=" .. #sorts)
     end
 
-    -- 时间标签条刷新（顶部/底部条通用；isTop 决定文字垂直居中还是贴底）
+    -- Refresh a time label bar (shared by top/bottom bars; isTop decides whether text is vertically centered or bottom-aligned)
     local function updateTimeBar(bar, isTop)
         if not bar or not bar.layout or not bar.component then return end
         pcall(function()
@@ -1157,8 +1157,8 @@ local function refreshDiagram()
                     if raRect and raRect.w > 0 and tlcRect and tlcRect.w > 0 then
                         local offsetX = raRect.x - tlcRect.x
                         local offsetY = (raRect.y + raRect.h) - tlcRect.y
-                        -- 时间刻度设置决定标签步长：完整视图 2分→每4分（0,4,8…）、5分→每5分、10分→每10分；
-                        -- 放大时用刻度步长（更密，与参考线一致）。
+                        -- The time scale setting decides the label step: full view 2 min -> every 4 min (0,4,8...), 5 min -> every 5 min, 10 min -> every 10 min;
+                        -- when zoomed, the scale step is used (denser, matching the reference lines).
                         local gridStep = timetable.getTimeScale()
                         if gridStep ~= 2 and gridStep ~= 10 then gridStep = 5 end
                         local labelStep = zoomState.active and gridStep or ((gridStep == 2) and 4 or gridStep)
@@ -1169,10 +1169,10 @@ local function refreshDiagram()
                             local cx = offsetX + fx * dw
                             local label = api.gui.comp.TextView.new(string.format("%02d:00", m))
                             label:setStyleClassList({"timetable-mono-sc"})
-                            -- 底部条：文字贴容器底部（gravity 1），从居中位置下移约半字，
-                            -- 避免紧贴运行图底边框；顶部条保持垂直居中。
-                            -- 注意：label 必须显式占满 TIME_LABEL_HEIGHT 高，gravity 才有效——
-                            -- 否则 TextView 按文字高度自适应，gravity 形同虚设。
+                            -- Bottom bar: text aligned to the container's bottom (gravity 1), moved down about half a character from the centered position,
+                            -- so it doesn't touch the diagram's bottom border; the top bar stays vertically centered.
+                            -- Note: the label must explicitly fill the TIME_LABEL_HEIGHT height for gravity to work --
+                            -- otherwise the TextView sizes itself to the text height and gravity has no effect.
                             label:setMinimumSize(api.gui.util.Size.new(labelW, TIME_LABEL_HEIGHT))
                             label:setMaximumSize(api.gui.util.Size.new(labelW, TIME_LABEL_HEIGHT))
                             if isTop then
@@ -1200,7 +1200,7 @@ local function refreshDiagram()
             end)
         end)
     end
-    -- 按当前时间标签位置刷新对应时间条：both = 顶部+底部都画；单条模式只画所在侧
+    -- Refresh the time bars for the current time label position: both = draw top and bottom; single-bar modes only draw their side
     local tlp = timetable.getTimeLabelPos()
     if tlp ~= "top" and tlp ~= "both" then tlp = "bottom" end
     if tlp == "top" or tlp == "both" then updateTimeBar(menu.timeBarTop, true) end
@@ -1210,9 +1210,9 @@ local function refreshDiagram()
     -- Platform labels, collected while drawing: {t = absolute seconds, y = px, text}
     local showPlatforms = timetable.getShowPlatforms()
     local platformLabels = {}
-    -- 折线单段绘制（放大窗口感知）：先按小时切段，再对每段做窗口裁剪。
-    -- 裁剪用 Liang-Barsky（timetableHelper.clipSegmentToRect），窗口 = 可视时间范围 × 画布高
-    -- （车站方向天然被窗口限制——窗口外站无 Y 值、折线已断，y 裁剪只是防御）。
+    -- Draw a single polyline segment (zoom window aware): first split per hour, then clip each piece to the window.
+    -- Clipping uses Liang-Barsky (timetableHelper.clipSegmentToRect), window = visible time range x canvas height
+    -- (the station direction is naturally limited by the window -- stations outside the window have no Y value and the polyline is already broken; y clipping is just defensive).
     local function drawClippedSegment(lv, m1, y1, m2, y2)
         local c1, cy1, c2, cy2 = timetableHelper.clipSegmentToRect(m1, y1, m2, y2, tWin0, tWin1, 0, dh)
         if c1 == nil then return end
@@ -1257,7 +1257,7 @@ local function refreshDiagram()
     for li, ld in pairs(displayedLines) do
         if not ld.checked then goto continueLine end
         table.insert(drawDebug, ld.name)
-        -- 交路绘制模式：该线路若属于交路配置（TrainRoute mod 钩子），只画到换乘站（末站），不画折返/循环闭合段
+        -- Rotation drawing mode: if the line belongs to a rotation configuration (TrainRoute mod hook), only draw up to the transfer station (last station), not the reversal/loop closing segment
         local isJRL = isRotationLine(ld.id)
         local lv = menu.lineRenderViews[li + 1]
         if lv then
@@ -1269,9 +1269,9 @@ local function refreshDiagram()
             local cv = makeLRV()
             cv:setColor(ld.color)
             cv:setWidth(lw + 1)
-            -- 按行程推算逐车次跟踪：从首个有时刻的停靠站的每个槽位出发，按区间运行时间估算
-            -- 到达下一站的时刻并选取最接近的槽位（而非按槽位序号配对）。
-            -- 交路线：末站为换乘站，列车到站即换下一交路，不画本线发车，也不折返/循环闭合。
+            -- Track each run by projecting the journey: starting from every slot of the first stop with times, estimate the arrival
+            -- at the next station from the section running time and pick the nearest slot (rather than pairing slots by index).
+            -- Rotation lines: the last station is the transfer station; trains switch to the next rotation line on arrival, so this line's departure isn't drawn and there is no reversal/loop closing.
             -- The runs are kept for the live vehicle overlay.
             ld.runs = diagramTrains.buildRuns(ld.stations, ld.legTimes or {}, isJRL)
             for _, run in ipairs(ld.runs) do
@@ -1281,9 +1281,9 @@ local function refreshDiagram()
                     local st = ld.stations[visit.flatIdx]
                     local y = yMap[st.uniqueKey]
                     if not y then
-                        -- 该停站不在当前运行图纵轴上
-                        -- 车站：跨线车次的异线车站 → 方案A断开折线
-                        -- 路径点：仅"沿轨道经过"的路径控制点 → 静默跳过（不添加点也不断开）
+                        -- This stop is not on the current diagram's vertical axis
+                        -- Station: a foreign station of a through run -> option A, break the polyline
+                        -- Waypoint: only path control points "passed along the track" -> silently skipped (no point added, no break)
                         if st.stopType == "station" and #cur > 0 then
                             polylines[#polylines + 1] = cur
                             cur = {}
@@ -1316,7 +1316,7 @@ local function refreshDiagram()
                     for __, p in pairs(pl) do
                         local pm = (p.uw % 3600) / 60
                         local ny = p.y
-                        -- 时间窗口 + 车站窗口双重过滤：窗口外（含外推 Y 越界）的十字标记不画
+                        -- Double filter on time window + station window: cross markers outside the window (including extrapolated out-of-range Y) are not drawn
                         if pm >= tWin0 and pm <= tWin1 and ny >= 0 and ny <= dh then
                             local nx = timeX(pm)
                             cv:addLine(api.type.Vec2f.new(nx - 2, ny), api.type.Vec2f.new(nx + 2, ny))
@@ -1330,8 +1330,8 @@ local function refreshDiagram()
     end
     end  -- if #displayedLines > 0
 
-    -- 边框视图最后创建（叠在折线之上），避免折线的十字标记把边框线盖住。
-    -- addLine 用实际渲染像素坐标（dw/dh 已取 renderArea 实际尺寸并收缩到窗口内）
+    -- The border view is created last (on top of the polylines), so the polylines' cross markers don't cover the border lines.
+    -- addLine uses actual rendered pixel coordinates (dw/dh are already the actual renderArea size, shrunk to fit the window)
     local bv = makeLRV()
     bv:setColor(api.type.Vec4f.new(0.5, 0.5, 0.5, 0.3))
     bv:setWidth(3)
@@ -1386,9 +1386,9 @@ local function toggleLineSelection(idx)
     end
 end
 
--- setContent 会把内容视图复位到顶部，但可能保留旧的滚动条值，导致"内容在顶、滚动条在底"的错位
--- （setScrollOffset 传相同值不会触发重新同步）。这里先归零再设目标值，强制引擎重新同步；
--- 若初始捕获失败，布局完成后再补捕获。双重 invokeLater 等布局完成。
+-- setContent resets the content view to the top but may keep the old scroll bar value, causing a "content at top, scroll bar at bottom" mismatch
+-- (setScrollOffset with the same value doesn't trigger a resync). So reset to zero first, then set the target value, forcing the engine to resync;
+-- if the initial capture failed, capture again after layout. Double invokeLater waits for the layout to finish.
 local function restoreScrollOffset(area, offset)
     if not area then return end
     area:invokeLater(function()
@@ -1505,7 +1505,7 @@ local function updateLineList()
     for li, ld in pairs(displayedLines) do
         lineCount = lineCount + 1
         table.insert(lineListDebug, ld.name)
-        -- 先统计该线路的准点车辆数，决定行高（准点文本并入线路行内，色块右侧垂直排列）
+        -- First count the line's vehicles with punctuality info to decide the row height (punctuality text is part of the line row, stacked vertically right of the color swatch)
         local punctRowCount = 0
         local punctData0 = _G._punctuality
         if punctData0 then
@@ -1520,9 +1520,9 @@ local function updateLineList()
         local ic = api.gui.comp.Component.new("lineItem_" .. li)
         local il = api.gui.layout.BoxLayout.new("HORIZONTAL")
         ic:setLayout(il)
-        -- 行宽最小 220（与左栏一致），最大放宽：线路名过长时行自然变宽，
-        -- 靠 ScrollArea 横向滚动条把被顶出去的准点信息滚回来（见 showDiagram 中
-        -- lineScrollArea 的 setHorizontalScrollBarPolicy）。
+        -- Minimum row width 220 (same as the left column), maximum relaxed: overly long line names make the row naturally wider,
+        -- and the ScrollArea's horizontal scroll bar brings the pushed-out punctuality info back into view (see
+        -- lineScrollArea's setHorizontalScrollBarPolicy in showDiagram).
         ic:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, rowH))
         ic:setMaximumSize(api.gui.util.Size.new(600, rowH))
 
@@ -1541,8 +1541,8 @@ local function updateLineList()
             cur.checked = not cur.checked
             pcall(function() ckImg:setImage(cur.checked and "ui/checkbox1.tga" or "ui/checkbox0.tga", false) end)
             pcall(function() refreshDiagram() end)
-            -- 勾选/取消勾选线路后立即保存到当前预设（内部会触发 _diagramForceSync 同步），
-            -- 避免直接退出游戏/关窗时勾选状态丢失（"保存不上"）。
+            -- Save to the current preset immediately after ticking/unticking a line (internally triggers _diagramForceSync),
+            -- so the tick state isn't lost when quitting the game/closing the window directly ("doesn't save").
             if currentPresetRef then
                 local okSave, saveErr = pcall(function()
                     saveCurrentPreset()
@@ -1578,10 +1578,10 @@ local function updateLineList()
         dotLayout:addItem(dotLrv, 0.5, 0.5)
         il:addItem(dotCont)
 
-        -- 准点信息：圆点（●）与文字合并为一个 TextView（"●正点"），颜色同为准点样式色
-        -- （正点白/早点绿/晚点红）。不设固定宽度：TextView 按实际渲染宽度自适应，
-        -- pvCont 随之自适应——避免估宽不准导致文字被裁（"跑后面被遮住"）。
-        -- 若整行（勾选框+线路名+色块+准点）超出 220，行自然变宽，由横向滚动条带回。
+        -- Punctuality info: dot (●) and text merged into one TextView ("●On time"), both in the punctuality style color
+        -- (on time white/early green/late red). No fixed width: the TextView sizes itself to the actual rendered width,
+        -- and pvCont follows -- avoids text being clipped due to inaccurate width estimates ("pushed back and hidden").
+        -- If the whole row (checkbox + line name + swatch + punctuality) exceeds 220, the row naturally gets wider and the horizontal scroll bar brings it back.
         local pvCont = api.gui.comp.Component.new("pvCont_" .. li)
         local pvl = api.gui.layout.BoxLayout.new("VERTICAL")
         pvCont:setLayout(pvl)
@@ -1609,7 +1609,7 @@ local function updateLineList()
     nc:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, totalHeight))
     menu.lineScrollArea:setContent(nc)
     menu.lineListLayout = nl; menu.lineListComponent = nc
-    -- 恢复刷新前的滚动位置，避免车次列表回到最上面（影响用户继续改动）
+    -- Restore the scroll position from before the refresh, so the line list doesn't jump back to the top (would disrupt the user's further edits)
     restoreScrollOffset(menu.lineScrollArea, prevOffset)
 end
 
@@ -1621,10 +1621,10 @@ local function applyPresetToStations(preset)
         if d then st.selected = d.selected or false; st.sort = (type(d.sort) == "number" and d.sort > 0 and d.sort <= 255) and d.sort or 256
         else st.selected = false; st.sort = 1 end
     end
-    -- 线路勾选先整体重置为勾选，再按 preset.lineData 覆盖：
-    -- 车站勾选是显式赋值（else st.selected = false），而线路之前只覆盖 lineData 里存在的线路，
-    -- 未被覆盖的线路会继承上一预设的勾选状态（残留为全勾选），导致"切换预设回来又全部勾选"。
-    -- 重置后再覆盖使线路状态与车站一样确定化。
+    -- Line ticks are first all reset to ticked, then overridden by preset.lineData:
+    -- station ticks are assigned explicitly (else st.selected = false), but lines used to only override lines present in lineData;
+    -- lines not overridden inherited the previous preset's tick state (left fully ticked), so "switching back to a preset ticks everything again".
+    -- Resetting before overriding makes line state as deterministic as station state.
     for _, ld in pairs(allLines) do ld.checked = true end
     if preset.lineData then
         for _, ld in pairs(allLines) do
@@ -1635,8 +1635,8 @@ local function applyPresetToStations(preset)
 end
 
 saveCurrentPreset = function()
-    -- 只允许保存当前展开的预设；不落入 getActivePreset() 回退，
-    -- 避免在 allStations 为未加载默认状态时把空配置写回（数据丢失）。
+    -- Only the currently expanded preset may be saved; don't fall back to getActivePreset(),
+    -- to avoid writing back an empty configuration while allStations is in its unloaded default state (data loss).
     local p = currentPresetRef
     if not p then dbgPrint("saveCurrentPreset: no current preset, skip"); return end
     local sd = {}
@@ -1653,10 +1653,10 @@ saveCurrentPreset = function()
 
     local ld = {}
     local ldCount = 0
-    -- 线路勾选状态从 allLines 保存（而非 displayedLines）：
-    -- displayedLines 只是"当前选中车站相关的线路"子集，且首次打开/未绘制时为空，
-    -- 用它会误把已保存的 lineData 清空（即"勾选状态保存不上"）。
-    -- allLines 是完整线路集合，与 applyPresetToStations 的应用侧（同样遍历 allLines）一致。
+    -- Line tick state is saved from allLines (not displayedLines):
+    -- displayedLines is only the subset "of lines related to the currently selected stations" and is empty on first open/before drawing;
+    -- using it would wrongly clear the saved lineData (i.e. "tick state doesn't save").
+    -- allLines is the complete line set, consistent with the applying side applyPresetToStations (which also iterates allLines).
     for _, line in pairs(allLines) do
         if line.id then
             ldCount = ldCount + 1
@@ -1738,8 +1738,8 @@ rebuildPresetList = function()
                 setActivePresetId(ps.id)
                 applyPresetToStations(ps)
                 sortAllStations()
-                -- 展开预设即展开车次列表并立即绘制该预设的运行图。
-                -- 勾选车站少于1个时 refreshDiagram 内部会清除旧图而不绘制（新增配置先勾选再点刷新）。
+                -- Expanding a preset expands the line list and immediately draws that preset's diagram.
+                -- With fewer than 1 station ticked, refreshDiagram clears the old diagram internally without drawing (new configs: tick stations first, then click refresh).
                 displayedLines = getRelevantLines(getSelectedStationList())
                 updateLineList()
                 if menu.renderLayout and menu.stationLabels and menu.timeBarTop then
@@ -1789,15 +1789,15 @@ rebuildPresetList = function()
             cw2:setPosition(400, 300)
             local ok2 = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.confirm), true)
             ok2:onClick(function()
-                -- 删除确认回调整体包 pcall：玩家反馈删除铁路线配置时偶发 Lua exception 崩溃
-                -- （如 attempt to index nil）。pcall 捕获后可记录具体错误、阻止崩溃传播。
+                -- The whole delete confirmation callback is wrapped in pcall: players reported occasional Lua exception crashes when deleting railway line configurations
+                -- (e.g. attempt to index nil). pcall catches it so the specific error can be logged and the crash doesn't propagate.
                 local okDel, delErr = pcall(function()
                     pcall(function() cw2:setVisible(false, false) end)
                     for i, p in ipairs(localPresets) do if p.id == targetId then table.remove(localPresets, i); break end end
                     if expandedPresetId == targetId then
                         expandedPresetId = nil
                         currentPresetRef = nil
-                        -- 删除正在展开的预设：清空车次列表与运行图，避免残留已删除预设的图形
+                        -- Deleting the currently expanded preset: clear the line list and diagram to avoid leftover graphics of the deleted preset
                         displayedLines = {}
                         updateLineList()
                         clearDiagramViews()
@@ -1827,7 +1827,7 @@ rebuildPresetList = function()
                 cb:onClick(function()
                     st.selected = not st.selected
                     ck:setImage(st.selected and "ui/checkbox1.tga" or "ui/checkbox0.tga", false)
-                    -- 勾选/取消勾选车站后立即保存当前铁路线配置，不再依赖保存按钮
+                    -- Save the current railway line configuration immediately after ticking/unticking a station, no longer relying on the save button
                     if currentPresetRef then
                         local okSave, saveErr = pcall(function()
                             saveCurrentPreset()
@@ -1853,8 +1853,8 @@ rebuildPresetList = function()
                 pcall(function() sp:setValue(sv, false) end)
                 sp:onChange(function(v)
                     st.sort = math.floor(v + 0.5)
-                    -- 排序序号改动后立即保存（注意：onChange 逐位触发，这里只写数据不重建 UI，
-                    -- 否则会打断输入框焦点/值，见 AGENTS.md 时刻表 SpinBox 丢值经验）
+                    -- Save immediately after the sort number changes (note: onChange fires per keystroke; only write data here, don't rebuild the UI,
+                    -- otherwise the input field loses focus/value, see the AGENTS.md lesson on timetable SpinBox losing values)
                     if currentPresetRef then
                         local okSave, saveErr = pcall(function()
                             saveCurrentPreset()
@@ -1875,7 +1875,7 @@ rebuildPresetList = function()
     end
 
     menu.presetScrollArea:setContent(nc)
-    -- 恢复刷新/重建前的滚动位置，避免铁路线列表回到最上面
+    -- Restore the scroll position from before the refresh/rebuild, so the railway line list doesn't jump back to the top
     restoreScrollOffset(menu.presetScrollArea, prevOffset)
 end
 
@@ -1887,10 +1887,10 @@ local function addNewPreset()
     currentPresetRef = ps
     expandedPresetId = id
     applyPresetToStations(ps)
-    -- 新预设默认全部线路勾选：显式重置 allLines.checked（否则会继承上一预设经 allLines
-    -- 传递的勾选状态，导致"只默认勾选第一个"）。
+    -- New presets have all lines ticked by default: explicitly reset allLines.checked (otherwise it inherits the tick state passed on via allLines
+    -- from the previous preset, causing "only the first one ticked by default").
     for _, ld in pairs(allLines) do ld.checked = true end
-    -- 新预设无勾选车站：清空车次列表与运行图（不绘制），等待玩家勾选车站后点刷新绘制
+    -- New preset without ticked stations: clear the line list and diagram (don't draw); wait for the player to tick stations and click refresh
     displayedLines = {}
     updateLineList()
     clearDiagramViews()
@@ -1898,9 +1898,9 @@ local function addNewPreset()
     pendingScrollPresetRow = nil
     rebuildPresetList()
     pendingScrollPresetId = nil
-    -- 滚动预设列表，让新增加的预设表头露出：用 ensureVisible 做最小滚动，
-    -- 保留上方已有配置（如配置11）仍在视口内，同时能看到新增的配置12。
-    -- 不能滚到顶部也不能滚到底部（新预设已展开，底部只有它的最后一个车站行）。
+    -- Scroll the preset list so the newly added preset's header becomes visible: use ensureVisible for minimal scrolling,
+    -- keeping existing configurations above (e.g. config 11) in the viewport while the new config 12 is visible too.
+    -- Must scroll neither to the top nor to the bottom (the new preset is expanded; the bottom only shows its last station row).
     local psa = menu.presetScrollArea
     local targetRow = pendingScrollPresetRow
     if psa and targetRow then
@@ -1913,7 +1913,7 @@ local function addNewPreset()
 end
 
 local function persistConfig()
-    -- onClose 兜底保存：整体包 pcall，避免删除预设后关窗时 Lua 错误传播导致崩溃
+    -- Fallback save on close: wrapped in pcall, so a Lua error when closing the window after deleting a preset doesn't propagate and crash
     local ok, err = pcall(function()
         if currentPresetRef then saveCurrentPreset() end
         savePresetsToTimetableObject()
@@ -1942,8 +1942,8 @@ end
 ---@param keepStationList boolean|nil auto refresh: keep the station panel (and its scroll
 ---  position and filter) as it is unless the set of stations/waypoints changed
 local function doRefreshData(keepStationList)
-    -- 记录刷新前线路勾选状态：getAllTimetableData 会重建 allLines（默认全勾选），
-    -- 刷新后恢复，保证"刚才勾选/取消勾选的线路"在刷新后不消失。
+    -- Remember the line tick state from before the refresh: getAllTimetableData rebuilds allLines (all ticked by default);
+    -- restore it after the refresh, so "lines just ticked/unticked" don't get lost by the refresh.
     local prevChecks = {}
     for _, ld in pairs(allLines) do
         if ld.id then prevChecks[tostring(ld.id)] = ld.checked end
@@ -1974,13 +1974,13 @@ local function doRefreshData(keepStationList)
         if sc then ld.color = sc end
     end
     if currentPresetRef then applyPresetToStations(currentPresetRef) end
-    -- 恢复刷新前内存中的勾选状态（与即时保存一致；未展开预设时的改动刷新后也能保留）
+    -- Restore the in-memory tick state from before the refresh (consistent with immediate saving; changes made without an expanded preset survive the refresh too)
     for _, ld in pairs(allLines) do
         local pc = prevChecks[tostring(ld.id)]
         if pc ~= nil then ld.checked = pc end
     end
     sortAllStations()
-    -- 刷新车次列表 + 重绘运行图；勾选车站少于1个时 refreshDiagram 内部会清除旧图
+    -- Refresh the line list + redraw the diagram; with fewer than 1 station ticked, refreshDiagram clears the old diagram internally
     displayedLines = getRelevantLines(getSelectedStationList())
     updateLineList()
     if menu.renderLayout and menu.stationLabels and menu.timeBarTop then
@@ -1989,15 +1989,15 @@ local function doRefreshData(keepStationList)
     if rebuildList then rebuildPresetList() end
 end
 
--- 应用"时间标签位置"设置：把图表区（ca，含站名标签+运行图）与时间标签条（顶部条/底部条）
--- 在 da 的 FloatingLayout 里按目标位置排布。三态：
---   bottom（默认）：ca 顶部对齐(0.5,0) + 底部条(0.5,1) → 时间标签在下方
---   top：顶部条(0.5,0) + ca 底部对齐(0.5,1) → 时间标签在上方，图表区下移腾位
---   both：顶部条(0.5,0) + ca 居中(0.5,0.5) + 底部条(0.5,1) → 上下各一条，图表夹中间
--- both 时 ca 高度再让出第二条时间标签（图表可视高度相应缩 TIME_LABEL_HEIGHT）。
--- 用 removeItem + 重新 addItem(comp, alignX, alignY) 切换——addItem 是 renderLayout
--- 一直使用的形态（FloatingLayout 按对齐值放置子项，AGENTS.md 已验证）。setAlignment
--- 的索引在引擎里取不到可靠值（getItem:getId 无法匹配），故改用重建加入。
+-- Apply the "time label position" setting: arrange the chart area (ca, containing station labels + diagram) and the time label bars (top/bottom)
+-- in da's FloatingLayout according to the target position. Three states:
+--   bottom (default): ca top-aligned (0.5,0) + bottom bar (0.5,1) -> time labels below
+--   top: top bar (0.5,0) + ca bottom-aligned (0.5,1) -> time labels above, chart area moved down to make room
+--   both: top bar (0.5,0) + ca centered (0.5,0.5) + bottom bar (0.5,1) -> one bar above and one below, chart in between
+-- With both, ca's height also gives up room for the second time label bar (visible chart height shrinks by TIME_LABEL_HEIGHT).
+-- Switching uses removeItem + addItem(comp, alignX, alignY) again -- addItem is the form renderLayout
+-- has always used (FloatingLayout places children by alignment value, verified in AGENTS.md). setAlignment's
+-- index can't be obtained reliably from the engine (getItem:getId doesn't match), hence re-adding instead.
 local function applyTimeLabelPosition()
     local pos = timetable.getTimeLabelPos()
     if pos ~= "top" and pos ~= "both" then pos = "bottom" end
@@ -2009,12 +2009,12 @@ local function applyTimeLabelPosition()
         dbgPrint("applyTimeLabelPosition: missing layout refs, skip")
         return
     end
-    -- 已处于目标布局时跳过（幂等）
+    -- Skip if already in the target layout (idempotent)
     if menu.appliedTimeLabelPos == pos then
         dbgPrint("applyTimeLabelPosition: already " .. pos .. ", skip")
         return
     end
-    -- ca 高度联动：both = 让出两条时间标签；单条 = 让出一条（ca 内站名列/绘制区同步缩放）
+    -- ca height follows: both = room for two time label bars; single = room for one (station label column/draw area inside ca scale accordingly)
     local caH = WINDOW_HEIGHT - TITLE_BAR_H - ((pos == "both") and (2 * TIME_LABEL_HEIGHT) or TIME_LABEL_HEIGHT)
     menu.chartH = caH
     local caW = WINDOW_WIDTH - STATION_PANEL_WIDTH
@@ -2025,8 +2025,8 @@ local function applyTimeLabelPosition()
             comp:setMaximumSize(api.gui.util.Size.new(w, h))
         end)
     end
-    -- ca 位置：bottom→(0.5,0) 顶部 / top→(0.5,1) 底部 / both→(0.5,0.5) 居中。
-    -- 常驻结构下 ca 始终在 dal 中（构建时加入），removeItem(ca) 恒安全；tlcT/tlcB 从不 remove。
+    -- ca position: bottom->(0.5,0) top / top->(0.5,1) bottom / both->(0.5,0.5) centered.
+    -- In the persistent structure ca is always in dal (added at build time), so removeItem(ca) is always safe; tlcT/tlcB are never removed.
     local ax, ay = 0.5, 0
     if pos == "top" then ay = 1 elseif pos == "both" then ay = 0.5 end
     local prevAy = 0
@@ -2034,7 +2034,7 @@ local function applyTimeLabelPosition()
     if prevPos == "top" then prevAy = 1 elseif prevPos == "both" then prevAy = 0.5 end
     if prevPos == nil or prevAy ~= ay then
         pcall(function() dal:removeItem(ca) end)
-        -- 先设尺寸再重新加入（detached 时 set 更可靠），加入后再补设一次
+        -- Set the size before re-adding (setting while detached is more reliable), then set it once more after adding
         setH(ca, caW, caH)
         local ok, err = pcall(function() dal:addItem(ca, ax, ay) end)
         if not ok then debugPrint("applyTimeLabelPosition ca addItem FAILED: " .. tostring(err)) end
@@ -2044,20 +2044,20 @@ local function applyTimeLabelPosition()
     if slc then setH(slc, STATION_LABEL_WIDTH, caH) end
     local ra = menu.renderArea
     if ra then setH(ra, raW, caH) end
-    -- 时间条可见性：bottom=只底条 / top=只顶条 / both=两条
+    -- Time bar visibility: bottom = bottom bar only / top = top bar only / both = both bars
     pcall(function() tlcT:setVisible(pos == "top" or pos == "both", false) end)
     pcall(function() tlcB:setVisible(pos == "bottom" or pos == "both", false) end)
     menu.appliedTimeLabelPos = pos
     dbgPrint("applyTimeLabelPosition: pos=" .. pos .. " caH=" .. caH)
 end
 
--- 运行图放大窗口（2026-08-16 功能）：
--- 保持画布大小不变，改变绘制范围放大运行图。
---  第一行：时间刻度（与设置同等效力，改刻度会同步设置）；
---  第二行：时间区间（随刻度变化的窗口长度下拉）+ 车站区间（当前可见行数递减到2）；
---  第三行：确定（应用窗口尺寸并重置到左下角，重新绘制）；
---  手柄：↑↓←→ 平移（时间步进=刻度，车站步进=1行），带边界防护；
---  底部：恢复默认（回到完整视图）。
+-- Diagram zoom window (2026-08-16 feature):
+-- keeps the canvas size and changes the drawn range to zoom the diagram.
+--  Row 1: time scale (same effect as in settings; changing the scale syncs the setting);
+--  Row 2: time range (window length dropdown depending on the scale) + station range (currently visible row count, down to 2);
+--  Row 3: OK (apply window size, reset to bottom left and redraw);
+--  Pad: arrow buttons pan (time step = scale, station step = 1 row), with bounds protection;
+--  Bottom: restore default (back to full view).
 function diagramGUI.showZoomWindow()
     local okBody, bodyErr = pcall(function()
         local cc = api.gui.comp.Component.new("zoomContent")
@@ -2066,7 +2066,7 @@ function diagramGUI.showZoomWindow()
         cc:setMinimumSize(api.gui.util.Size.new(320, 430))
         cc:setMaximumSize(api.gui.util.Size.new(320, 430))
 
-        -- 各刻度的时间区间下拉项（分钟）："60:00" 格式
+        -- Time range dropdown items per scale (minutes): "60:00" format
         local function zoomIntervalItems(scale)
             local opts = ZOOM_INTERVAL_OPTIONS[scale] or ZOOM_INTERVAL_OPTIONS[5]
             local items = {}
@@ -2102,7 +2102,7 @@ function diagramGUI.showZoomWindow()
         if totalRanks < 1 then totalRanks = 1 end
         local selStations = totalRanks
 
-        -- 第一行：时间刻度（与设置同等效力）
+        -- Row 1: time scale (same effect as in settings)
         local scaleCb = api.gui.comp.ComboBox.new()
         local SCALE_ITEMS = { D.settings_scale_2, D.settings_scale_5, D.settings_scale_10 }
         local SCALE_VALUES = { 2, 5, 10 }
@@ -2111,12 +2111,12 @@ function diagramGUI.showZoomWindow()
         for i, v in ipairs(SCALE_VALUES) do if v == selScale then scaleIdx = i - 1 end end
         pcall(function() scaleCb:setSelected(scaleIdx, false) end)
 
-        -- 第二行：时间区间（选项随刻度变化）+ 车站区间
+        -- Row 2: time range (options depend on the scale) + station range
         local intervalCb = api.gui.comp.ComboBox.new()
         local function rebuildIntervalItems(scale, toDefault)
-            -- 注意：该版本 TPF2 的 ComboBox:clear() 绑定签名是 void(ComboBox*, bool)，
-            -- 必须传布尔（false=不触发信号），API 文档未列出该参数（实测报
-            -- "expected boolean, received no value"）。
+            -- Note: in this TPF2 version the ComboBox:clear() binding signature is void(ComboBox*, bool);
+            -- a boolean must be passed (false = don't fire signals); the API docs don't list this parameter (verified error:
+            -- "expected boolean, received no value").
             intervalCb:clear(false)
             local items, opts = zoomIntervalItems(scale)
             for _, it in ipairs(items) do intervalCb:addItem(it) end
@@ -2132,7 +2132,7 @@ function diagramGUI.showZoomWindow()
             rebuildIntervalItems(selScale, true)
         end)
 
-        rebuildIntervalItems(selScale, true)  -- 初始默认 60:00
+        rebuildIntervalItems(selScale, true)  -- initial default 60:00
         makeComboRow(D.zoom_time_interval, "zoomRowInterval", intervalCb, function(i)
             local opts = ZOOM_INTERVAL_OPTIONS[selScale] or ZOOM_INTERVAL_OPTIONS[5]
             selInterval = opts[i + 1] or opts[1]
@@ -2146,7 +2146,7 @@ function diagramGUI.showZoomWindow()
             selStations = math.max(1, totalRanks - i)
         end)
 
-        -- 第三行：确定（应用窗口尺寸并重置到左下角，重新绘制）
+        -- Row 3: OK (apply window size, reset to bottom left and redraw)
         local btnRow = api.gui.comp.Component.new("zoomBtns")
         local btnRl = api.gui.layout.BoxLayout.new("HORIZONTAL")
         btnRow:setLayout(btnRl)
@@ -2154,7 +2154,7 @@ function diagramGUI.showZoomWindow()
         btnRl:addItem(okBtn)
         cl:addItem(btnRow)
 
-        -- 手柄：↑ ↓ ← →（十字布局）
+        -- Pad: up/down/left/right (cross layout)
         local pad = api.gui.comp.Component.new("zoomPad")
         local padL = api.gui.layout.BoxLayout.new("VERTICAL")
         pad:setLayout(padL)
@@ -2176,7 +2176,7 @@ function diagramGUI.showZoomWindow()
         makePadRow(nil, btnDown, nil)
         cl:addItem(pad)
 
-        -- 底部：恢复默认
+        -- Bottom: restore default
         local restoreBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.zoom_restore), true)
         cl:addItem(restoreBtn)
 
@@ -2187,11 +2187,11 @@ function diagramGUI.showZoomWindow()
             zoomState.tLen = selInterval
             zoomState.rStart = 1
             zoomState.rLen = selStations
-            _G._diagramForceSync = true  -- 时间刻度改动持久化同步（与设置同等效力）
+            _G._diagramForceSync = true  -- persist and sync time scale changes (same effect as in settings)
             pcall(function() refreshDiagram() end)
         end)
 
-        -- 手柄平移：时间步进=刻度分钟，车站步进=1行；边界防护（钳制）
+        -- Pad panning: time step = scale minutes, station step = 1 row; bounds protection (clamping)
         local function padPan(dir)
             if not zoomState.active then return end
             local total = 1
@@ -2231,7 +2231,7 @@ function diagramGUI.showZoomWindow()
         w:setPosition(400, 300)
     end)
     if not okBody then
-        -- 无条件输出（不受 _G._diagramDebug 门控）：放大窗口构建失败时可见，便于排查
+        -- Printed unconditionally (not gated by _G._diagramDebug): visible when building the zoom window fails, for troubleshooting
         print("[DiagramGUI] showZoomWindow ERROR: " .. tostring(bodyErr))
     end
 end
@@ -2277,17 +2277,17 @@ function diagramGUI.showDiagram()
         menu.timeBarBottom = nil
     end
 
-    -- 关窗即重置缩放（临时查看辅助，不持久化）
+    -- Reset zoom when the window is closed (temporary viewing aid, not persisted)
     zoomState.active = false
-    -- 设置/放大弹窗引用重置：重开运行图时旧的弹窗大概率已被引擎清理，避免引用失效
+    -- Reset settings/zoom popup references: when reopening the diagram the old popups have most likely been cleaned up by the engine; avoids stale references
     settingsWinRef = nil
     zoomWinRef = nil
     stationFilterText = ""
     loadPresetsFromTimetableObject()
 
-    -- 2026-08-16 方案定稿：打开运行图窗口时，
-    -- 1) 对账时刻表数据（拆/建站后把幸存站时刻归位到新位置、删除被拆站时刻）——有变化则触发跨线程同步；
-    -- 2) 清理预设里已删除车站的勾选/序号条目（其余站序号原样保留）。
+    -- 2026-08-16 final design: when the diagram window opens,
+    -- 1) reconcile timetable data (move surviving stations' times to their new positions after removing/building stations, delete times of removed stations) -- trigger cross-thread sync on changes;
+    -- 2) clean up checkbox/sort number entries of deleted stations in presets (other stations keep their sort numbers).
     pcall(function()
         local rc = timetable.reconcileStationData()
         if rc and (rc.rekeyed or 0) + (rc.removed or 0) > 0 then
@@ -2324,23 +2324,23 @@ function diagramGUI.showDiagram()
     leftPanel:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H))
     leftPanel:setMaximumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H))
 
-    -- 设置按钮行：位于左面板顶部（"铁路线"标题上方），打开刷新模式设置弹窗
+    -- Settings button row: at the top of the left panel (above the "Railway lines" title), opens the refresh mode settings popup
     local settingsBar = api.gui.comp.Component.new("settingsBar")
     local sbl = api.gui.layout.BoxLayout.new("HORIZONTAL")
     settingsBar:setLayout(sbl)
     local setBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.settings), true)
     setBtn:onClick(function()
-        -- 单例：已打开的设置弹窗只置顶/重显，不重复创建（2026-08-16 反馈）
+        -- Singleton: an already open settings popup is only raised/re-shown, not created again (2026-08-16 feedback)
         if reshowOrReset(settingsWinRef) then return end
         settingsWinRef = nil
         local okSetting, settingErr = pcall(function()
-            -- 设置弹窗：
-            -- 分区1 "刷新频率"：勾选 10s 自动刷新 或 手动刷新（互斥）
-            -- 分区2 "时间标签"：位置（上/下下拉）+ 时间刻度（2/5/10分下拉，默认5分）
-            -- 分区3 "准点判定阈值"：0/5/10/20/30/40/50/60s 下拉（默认10s）
-            -- 分区5 "车站间距"：等距 / 按距离 / 按运行时间 下拉（默认等距）
-            -- 点"确定"应用设置并刷新运行图；设置存 timetableObject 随存档永久保存，
-            -- 并置 _diagramForceSync 触发跨线程同步（GUI→引擎 state.timetable）。
+            -- Settings popup:
+            -- Section 1 "Refresh rate": tick 10s auto refresh or manual refresh (mutually exclusive)
+            -- Section 2 "Time labels": position (top/bottom dropdown) + time scale (2/5/10 min dropdown, default 5 min)
+            -- Section 3 "Punctuality threshold": 0/5/10/20/30/40/50/60s dropdown (default 10s)
+            -- Section 5 "Station spacing": equal / by distance / by running time dropdown (default equal)
+            -- Clicking "OK" applies the settings and refreshes the diagram; settings are stored in timetableObject and saved permanently with the game,
+            -- and _diagramForceSync is set to trigger cross-thread sync (GUI -> engine state.timetable).
             local cc = api.gui.comp.Component.new("settingsContent")
             local cl = api.gui.layout.BoxLayout.new("VERTICAL")
             cc:setLayout(cl)
@@ -2353,7 +2353,7 @@ function diagramGUI.showDiagram()
             local curScale = timetable.getTimeScale()
             local curPunct = timetable.getPunctThreshold()
             local curFilter = timetable.getPolylineFilter()
-            -- 待应用值：点"确定"才写入（用户要求"点击确定更改设置并刷新"）
+            -- Pending values: only written on "OK" (user request: "click OK to change settings and refresh")
             local selAuto = curAuto
             local selPos = curPos
             local selScale = curScale
@@ -2369,7 +2369,7 @@ function diagramGUI.showDiagram()
                 return lbl
             end
 
-            -- 生成 "文字标签 + 下拉框" 一行；onChange(i) 收到 0 基索引（-1=空）
+            -- Build a "text label + dropdown" row; onChange(i) receives a 0-based index (-1 = empty)
             local function makeComboRow(labelText, rowName, items, curIdx, onChange)
                 local row = api.gui.comp.Component.new(rowName)
                 local rl = api.gui.layout.BoxLayout.new("HORIZONTAL")
@@ -2390,7 +2390,7 @@ function diagramGUI.showDiagram()
                 cl:addItem(row)
             end
 
-            -- 分区1：刷新频率
+            -- Section 1: refresh rate
             cl:addItem(makeSectionLabel(D.settings_refresh_rate))
 
             local autoCk = api.gui.comp.ImageView.new(curAuto and "ui/checkbox1.tga" or "ui/checkbox0.tga")
@@ -2411,17 +2411,17 @@ function diagramGUI.showDiagram()
 
             cl:addItem(autoRow); cl:addItem(manRow)
 
-            -- 分区2：时间标签（位置 + 时间刻度）
+            -- Section 2: time labels (position + time scale)
             cl:addItem(makeSectionLabel(D.settings_time_label))
 
-            local POS_ITEMS = { D.settings_top, D.settings_bottom, D.settings_both }  -- 上/下/上下
+            local POS_ITEMS = { D.settings_top, D.settings_bottom, D.settings_both }  -- top/bottom/both
             local posCurIdx = 1
             if curPos == "top" then posCurIdx = 0 elseif curPos == "both" then posCurIdx = 2 end
             makeComboRow(D.settings_position, "settingRowPos", POS_ITEMS, posCurIdx, function(i)
                 selPos = (i == 0) and "top" or ((i == 2) and "both" or "bottom")
             end)
 
-            local SCALE_ITEMS = { D.settings_scale_2, D.settings_scale_5, D.settings_scale_10 }  -- 2/5/10分
+            local SCALE_ITEMS = { D.settings_scale_2, D.settings_scale_5, D.settings_scale_10 }  -- 2/5/10 min
             local SCALE_VALUES = { 2, 5, 10 }
             local scaleCurIdx = 1
             for i, v in ipairs(SCALE_VALUES) do if v == curScale then scaleCurIdx = i - 1 end end
@@ -2429,19 +2429,19 @@ function diagramGUI.showDiagram()
                 selScale = SCALE_VALUES[i + 1] or 5
             end)
 
-            -- 分区3：准点判定阈值
+            -- Section 3: punctuality threshold
             cl:addItem(makeSectionLabel(D.settings_punct_threshold))
 
             local PUNCT_VALUES = { 0, 5, 10, 20, 30, 40, 50, 60 }
             local PUNCT_ITEMS = {}
             for _, v in ipairs(PUNCT_VALUES) do PUNCT_ITEMS[#PUNCT_ITEMS + 1] = tostring(v) .. "s" end
-            local punctCurIdx = 2   -- 默认 10s
+            local punctCurIdx = 2   -- default 10s
             for i, v in ipairs(PUNCT_VALUES) do if v == curPunct then punctCurIdx = i - 1 end end
             makeComboRow("", "settingRowPunct", PUNCT_ITEMS, punctCurIdx, function(i)
                 selPunct = PUNCT_VALUES[i + 1] or 10
             end)
 
-            -- 分区4：运行方向筛选（折线只画往上/往下/全部）
+            -- Section 4: running direction filter (polylines drawn upward only/downward only/all)
             cl:addItem(makeSectionLabel(D.settings_polyline_filter))
 
             local FILTER_ITEMS = { D.settings_polyline_all, D.settings_polyline_up, D.settings_polyline_down }
@@ -2452,7 +2452,7 @@ function diagramGUI.showDiagram()
                 selFilter = FILTER_VALUES[i + 1] or "all"
             end)
 
-            -- 分区5：车站间距（等距 / 按线路距离 / 按运行时间）
+            -- Section 5: station spacing (equal / by line distance / by running time)
             cl:addItem(makeSectionLabel(D.settings_spacing))
 
             local SPACING_ITEMS = { D.settings_spacing_equal, D.settings_spacing_distance, D.settings_spacing_time }
@@ -2522,13 +2522,13 @@ function diagramGUI.showDiagram()
             end)
             okBtn:onClick(function()
                 pcall(function() w:setVisible(false, false) end)
-                -- 点"确定"才应用设置并刷新运行图：
-                -- 1) 刷新频率（10s 自动刷新 / 手动刷新）
-                -- 2) 时间标签位置（重排图表区 + 重绘时间标签）
-                -- 3) 时间刻度（重绘网格竖线 + 时间标签步长）
-                -- 4) 准点判定阈值（重算晚点/正点/早点分类）
-                -- 5) 运行方向筛选（重绘折线：只画往上/往下/全部）
-                -- 6) 车站间距（重算各行纵坐标）
+                -- Settings are only applied and the diagram refreshed on "OK":
+                -- 1) refresh rate (10s auto refresh / manual refresh)
+                -- 2) time label position (rearrange chart area + redraw time labels)
+                -- 3) time scale (redraw vertical grid lines + time label step)
+                -- 4) punctuality threshold (recompute late/on time/early classification)
+                -- 5) running direction filter (redraw polylines: upward only/downward only/all)
+                -- 6) station spacing (recompute row y coordinates)
                 -- 7) platform number labels
                 -- 8) live vehicle overlay
                 local okApply, applyErr = pcall(function()
@@ -2542,9 +2542,9 @@ function diagramGUI.showDiagram()
                     timetable.setShowVehicles(selVehicles)
                     _G._diagramForceSync = true
                     applyTimeLabelPosition()
-                    -- 布局切换（ca 重放/尺寸/时间条可见性）需要一帧让引擎重排收敛后再刷新——
-                    -- 立即 doRefreshData 会读到未收敛的布局（首次切「上下」顶条与图重叠、
-                    -- 二次切换才正常，玩家实测 2026-08-16）
+                    -- Layout switching (ca repositioning/size/time bar visibility) needs a frame for the engine's relayout to settle before refreshing --
+                    -- calling doRefreshData immediately reads an unsettled layout (the first switch to "top and bottom" overlapped the top bar with the chart,
+                    -- only the second switch was correct, player testing 2026-08-16)
                     if menu.window then
                         menu.window:invokeLater(function()
                             pcall(function() doRefreshData() end)
@@ -2560,10 +2560,10 @@ function diagramGUI.showDiagram()
         if not okSetting then debugPrint("settings window ERROR: " .. tostring(settingErr)) end
     end)
     sbl:addItem(setBtn)
-    -- 放大手柄按钮：打开运行图放大窗口（时间/车站区间 + 平移手柄 + 恢复默认）
+    -- Zoom pad button: opens the diagram zoom window (time/station range + pan pad + restore default)
     local zoomBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.zoom), true)
     zoomBtn:onClick(function()
-        -- 单例：已打开的放大弹窗只置顶/重显，不重复创建（2026-08-16 反馈）
+        -- Singleton: an already open zoom popup is only raised/re-shown, not created again (2026-08-16 feedback)
         if reshowOrReset(zoomWinRef) then return end
         zoomWinRef = nil
         local okZ, zErr = pcall(diagramGUI.showZoomWindow)
@@ -2582,9 +2582,9 @@ function diagramGUI.showDiagram()
 
     leftLayout:addItem(phc)
 
-    -- 搜索行：独立一行（"车站搜索"标题 + 输入框）。
-    -- 旧布局把"搜索"标题塞进"铁路线"标题行，英文单词过长把输入框挤出左栏被遮挡；
-    -- 拆成单独一行后输入框有完整宽度可用。
+    -- Search row: a row of its own ("Station search" title + input field).
+    -- The old layout put the "Search" title into the "Railway lines" title row; long English words pushed the input field out of the left column where it was hidden;
+    -- in a separate row the input field has the full width available.
     local shc = api.gui.comp.Component.new("searchHeader")
     local shl = api.gui.layout.BoxLayout.new("HORIZONTAL")
     shc:setLayout(shl)
@@ -2601,8 +2601,8 @@ function diagramGUI.showDiagram()
     local btnBar = api.gui.comp.Component.new("buttonBar")
     local bbl = api.gui.layout.BoxLayout.new("HORIZONTAL")
     btnBar:setLayout(bbl)
-    -- 保存按钮已移除：车站勾选/排序序号/线路勾选均为即时保存；
-    -- 车次列表与运行图由"展开预设"或"刷新"按钮触发。
+    -- Save button removed: station ticks/sort numbers/line ticks are all saved immediately;
+    -- the line list and diagram are triggered by "expand preset" or the "Refresh" button.
     local refBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(D.refresh), true)
     refBtn:onClick(function()
         local ok, err = pcall(function() doRefreshData() end)
@@ -2665,7 +2665,7 @@ function diagramGUI.showDiagram()
     end)
     lhl:addItem(lineColorBtn)
 
-    -- 准点信息标题：比"车次列表"小一号字号（timetable-mono-sc 为 10px），位于颜色按钮右侧
+    -- Punctuality info title: one font size smaller than "Line list" (timetable-mono-sc is 10px), right of the color button
     local punctTv = api.gui.comp.TextView.new(D.punctuality)
     punctTv:setStyleClassList({"timetable-mono-sc"})
     lhl:addItem(punctTv)
@@ -2679,9 +2679,9 @@ function diagramGUI.showDiagram()
     lsa:setMinimumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 270))
     lsa:setMaximumSize(api.gui.util.Size.new(STATION_PANEL_WIDTH, 270))
     menu.lineScrollArea = lsa
-    -- 允许横向滚动：线路名过长把准点信息顶出后，可横向滚动查看。
-    -- ScrollBarPolicy 枚举未在官方 API 文档中列出（只提到 setHorizontalScrollBarPolicy），
-    -- 故 best-effort：枚举路径取不到就跳过，依赖 ScrollArea 默认行为。
+    -- Allow horizontal scrolling: when long line names push the punctuality info out, it can be scrolled into view horizontally.
+    -- The ScrollBarPolicy enum isn't listed in the official API docs (only setHorizontalScrollBarPolicy is mentioned),
+    -- so best effort: skip if the enum path can't be resolved and rely on the ScrollArea's default behavior.
     pcall(function()
         local policy = nil
         pcall(function()
@@ -2697,11 +2697,11 @@ function diagramGUI.showDiagram()
     mainLayout:addItem(leftPanel)
 
     local da = api.gui.comp.Component.new("diagramArea")
-    -- 用 FloatingLayout 承载 ca(图表区)/tlc(时间标签条)：子项按相对父容器的对齐位置放置
-    -- （0=左/上, 0.5=中, 1=右/下），可通过 setAlignment(index, x, y) 运行时切换。
-    -- 说明：BoxLayout 的 removeItem+addItem 动态重排实测不生效；AbsoluteLayout 的
-    -- Rect 坐标语义与 LineRenderView 不一致（实测把 ca 放错位置）。FloatingLayout
-    -- 与 renderLayout 同款，对齐行为可靠。
+    -- A FloatingLayout holds ca (chart area)/tlc (time label bar): children are placed by alignment relative to the parent container
+    -- (0 = left/top, 0.5 = center, 1 = right/bottom) and can be switched at runtime via setAlignment(index, x, y).
+    -- Note: dynamic rearranging via BoxLayout's removeItem+addItem was verified not to work; AbsoluteLayout's
+    -- Rect coordinate semantics differ from LineRenderView (verified: it put ca in the wrong place). FloatingLayout
+    -- is the same as renderLayout, and its alignment behavior is reliable.
     local dal = api.gui.layout.FloatingLayout.new(0, 1)
     da:setLayout(dal)
     da:setMinimumSize(api.gui.util.Size.new(WINDOW_WIDTH - STATION_PANEL_WIDTH, WINDOW_HEIGHT - TITLE_BAR_H))
@@ -2740,11 +2740,11 @@ function diagramGUI.showDiagram()
     end
     mkiv(); mkiv()
     cl2:addItem(ra)
-    -- 常驻布局（2026-08-16 重构，修复 RemoveChild assert + 顶条 0 尺寸问题）：
-    -- ca(图表区) + 顶部时间条 tlcT + 底部时间条 tlcB 三者在构建时就全部 addItem 进 dal
-    -- （tlcT 顶 0.5,0 / tlcB 底 0.5,1，位置固定），applyTimeLabelPosition 只切换条的
-    -- 可见性与 ca 的位置/尺寸——**不再动态 add/remove 时间条**（上一版对"未加入的组件"
-    -- removeItem 触发 UI::CComponent::RemoveChild assert，玩家实测崩溃）。
+    -- Persistent layout (2026-08-16 refactor, fixes the RemoveChild assert + zero-size top bar issues):
+    -- ca (chart area) + top time bar tlcT + bottom time bar tlcB are all added to dal via addItem at build time
+    -- (tlcT top 0.5,0 / tlcB bottom 0.5,1, fixed positions); applyTimeLabelPosition only toggles the bars'
+    -- visibility and ca's position/size -- **time bars are no longer added/removed dynamically** (the previous version called removeItem on "components not added",
+    -- triggering the UI::CComponent::RemoveChild assert; players hit crashes).
     dal:addItem(ca, 0.5, 0)
     local function makeTimeBar(compName)
         local bar = api.gui.comp.Component.new(compName)
@@ -2769,8 +2769,8 @@ function diagramGUI.showDiagram()
     local okW2, newWin = pcall(function() return api.gui.comp.Window.new(D.title, wrapper) end)
     if not okW2 or not newWin then debugPrint("Window.new failed"); return end
     menu.window = newWin
-    -- 应用已保存的时间标签位置（bottom/top/both）：窗口创建后按 pos 统一执行
-    -- （可见性切换 + ca 位置/尺寸），此时引擎组件才真正 attach。
+    -- Apply the saved time label position (bottom/top/both): done uniformly by pos after the window is created
+    -- (visibility toggling + ca position/size), when the engine components are actually attached.
     menu.appliedTimeLabelPos = nil
     pcall(function() applyTimeLabelPosition() end)
     menu.window:invokeLater(function()
@@ -2784,8 +2784,8 @@ function diagramGUI.showDiagram()
     menu.window:setMovable(true); menu.window:setResizable(true)
     menu.window:setSize(api.gui.util.Size.new(WINDOW_WIDTH, WINDOW_HEIGHT))
     menu.window:setPosition(200, 100)
-    -- 自动刷新：勾选"10s 自动刷新"时，每 10s 执行一次完整刷新（与"刷新"按钮等同：
-    -- 重新读取时刻表数据 + 重建车次列表含准点 + 重绘运行图）。
+    -- Auto refresh: with "10s auto refresh" ticked, a full refresh runs every 10s (same as the "Refresh" button:
+    -- re-read timetable data + rebuild the line list including punctuality + redraw the diagram).
     menu.window:onStep(function()
         -- live vehicle overlay: redrawn when the game second changes, but at most twice per real
         -- second (os.clock), so fast game speeds do not rebuild the views more often

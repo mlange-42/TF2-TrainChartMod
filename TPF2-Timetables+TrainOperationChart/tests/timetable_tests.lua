@@ -102,9 +102,9 @@ end
 
 timetableTests[#timetableTests + 1] = function()
     timetable.setTimetableObject({})
-    -- 构造旧存档格式的 currentlyWaiting：
-    --   停站条目 outboundTime 是旧版"整站共享时间戳"的标量数字
-    --   停站条目缺失 outboundTime
+    -- Build currentlyWaiting in the old save format:
+    --   stop entry whose outboundTime is the old scalar "timestamp shared by the whole station"
+    --   stop entry missing outboundTime
     timetable.setCurrentlyWaiting({
         ["10"] = { stations = { [3] = { currentlyWaiting = {}, outboundTime = 12345 } } },
         ["20"] = { stations = { [1] = { currentlyWaiting = {} } } },
@@ -118,9 +118,9 @@ timetableTests[#timetableTests + 1] = function()
     print("  OK: sanitizeCurrentlyWaiting")
 end
 
--- waitingRequired 回归测试：已过发车时刻、晚点在容差内 → 必须放行（forceDeparture 被调用）
+-- waitingRequired regression test: departure time passed, delay within tolerance -> must release (forceDeparture is called)
 timetableTests[#timetableTests + 1] = function()
-    -- 用桩替换 timetable_helper（原桩是空表，waitingRequired 需要 getTime 等）
+    -- Replace timetable_helper with a stub (the original stub is an empty table; waitingRequired needs getTime etc.)
     local mockTime = 3600 * 13 + 720   -- 13:12
     local mockLine = 100
     local mockStop = 1
@@ -129,25 +129,25 @@ timetableTests[#timetableTests + 1] = function()
         getTime = function() return mockTime end,
         getCurrentLine = function() return mockLine end,
         getCurrentStation = function() return mockStop end,
-        getTimeUntilDeparture = function() return 3 end,  -- 关门倒计时 <5，进入 ArrDep 判定
+        getTimeUntilDeparture = function() return 3 end,  -- door-closing countdown <5, enters the ArrDep check
         forceDeparture = function() forceCalls = forceCalls + 1 end,
     }
-    -- 需重载 timetable 模块（模块级 currentlyWaiting/timetableObject 重置）
+    -- The timetable module must be reloaded (resets module-level currentlyWaiting/timetableObject)
     package.loaded[".res.scripts.celmi.timetables.timetable"] = nil
     local tt = require ".res.scripts.celmi.timetables.timetable"
-    -- 构造时刻表对象：线路100（已勾选遵循时刻表）站1 ArrDep 0:00到 0:10发
+    -- Build the timetable object: line 100 ("follow timetable" ticked), station 1 ArrDep arrival 0:00, departure 0:10
     tt.setTimetableObject({
         ["100"] = { hasTimetable = true, stations = { [1] = { conditions = { type = "ArrDep", ArrDep = { {0,0,10,0} } } } } },
     })
     tt.setCurrentlyWaiting({})
-    tt.setDelayTolerance(300)  -- 5分钟容差
+    tt.setDelayTolerance(300)  -- 5-minute tolerance
 
-    -- 场景1：车 13:12 到站（发车 13:10 已过2分钟，晚点在容差内）→ 应放行且 forceDeparture
+    -- Case 1: vehicle arrives 13:12 (departure 13:10 passed by 2 minutes, delay within tolerance) -> should be released with forceDeparture
     assert(tt.waitingRequired("V1") == false, "late within tolerance should release")
     assert(forceCalls >= 1, "forceDeparture must be called when releasing a late train")
     print("  OK: late-within-tolerance release triggers forceDeparture (" .. forceCalls .. " calls)")
 
-    -- 场景2：车 13:16 到站（发车 13:10 已过6分钟，超过容差）→ 应扣车
+    -- Case 2: vehicle arrives 13:16 (departure 13:10 passed by 6 minutes, beyond tolerance) -> should be held
     forceCalls = 0
     mockTime = 3600 * 13 + 960
     tt.setCurrentlyWaiting({})
@@ -156,48 +156,48 @@ timetableTests[#timetableTests + 1] = function()
     print("  OK: late-beyond-tolerance holds to next cycle")
 end
 
--- 发车检测守卫回归测试（2026-08-05，用户场景：多套时刻表线路出现假"早24:28"）：
--- 用户线路始发站两套时刻表：第一套 22:30/23:30、第二套 46:30/48:00。
--- 列车本周期 46:30 正点到站（选定第二套），但 lineStopDepartures 还留着上一周期
--- 23:32 从本站发车的旧记录。旧代码把 d>0 当成"本次发车"→ 拿 1412s(23:32) 减第二套
--- 计划发车 2880s(48:00) → 假"早 24:28"（1468s）。
--- 修复：timetable.isValidDepartureRecord 只认"本次到站之后(>=arrTime)、不晚于当前(<=now)"的记录。
+-- Departure detection guard regression test (2026-08-05, user scenario: bogus "24:28 early" on a line with multiple slot sets):
+-- The user's line has two slot sets at the first station: set 1 22:30/23:30, set 2 46:30/48:00.
+-- The train arrives on time at 46:30 in this cycle (set 2 chosen), but lineStopDepartures still holds the old record
+-- of departing this station at 23:32 in the previous cycle. The old code treated d>0 as "this departure" -> 1412s(23:32) minus set 2's
+-- planned departure 2880s(48:00) -> bogus "24:28 early" (1468s).
+-- Fix: timetable.isValidDepartureRecord only accepts records "after this arrival (>=arrTime) and not later than now (<=now)".
 timetableTests[#timetableTests + 1] = function()
-    -- 需重载 timetable 模块（模块级 currentlyWaiting/timetableObject 重置）
+    -- The timetable module must be reloaded (resets module-level currentlyWaiting/timetableObject)
     package.loaded[".res.scripts.celmi.timetables.timetable"] = nil
     local tt = require ".res.scripts.celmi.timetables.timetable"
 
-    -- 场景1（用户反馈的核心）：列车 46:30(2790s) 到站，现在是 47:29(2849s)，
-    -- lineStopDepartures 残留上一周期 23:32 的旧记录(1412s) → 必须拒绝，不得当"本次发车"
+    -- Case 1 (core of the user report): train arrived 46:30 (2790s), now is 47:29 (2849s),
+    -- lineStopDepartures holds the previous cycle's old record from 23:32 (1412s) -> must be rejected, not treated as "this departure"
     assert(tt.isValidDepartureRecord(1412 * 1000, 2849, 2790) == false,
         "stale departure record from previous cycle must be rejected")
 
-    -- 场景2：真实发车 48:00(2880s)，到站 46:30(2790s)，现在刚好 48:00 → 接受
+    -- Case 2: actual departure 48:00 (2880s), arrival 46:30 (2790s), now is exactly 48:00 -> accepted
     assert(tt.isValidDepartureRecord(2880 * 1000, 2880, 2790) == true,
         "real departure after this visit's arrival must be accepted")
 
-    -- 场景3：记录不晚于当前扫描时刻（未来值拒绝——扫描瞬间不可能拿到未来的发车记录）
+    -- Case 3: record must not be later than the current scan time (future values rejected -- a scan can't see a future departure record)
     assert(tt.isValidDepartureRecord(2990 * 1000, 2880, 2790) == false,
         "future departure record must be rejected")
 
-    -- 场景4：d 为 nil / 0 → 非发车（站内等待中）
+    -- Case 4: d is nil / 0 -> not a departure (waiting at the station)
     assert(tt.isValidDepartureRecord(nil, 2880, 2790) == false, "nil record rejected")
     assert(tt.isValidDepartureRecord(0, 2880, 2790) == false, "zero record rejected")
 
-    -- 场景5：到站事件漏拍（arrTime=nil）时仅按 <= now 兜底，不误杀真实发车
+    -- Case 5: missed arrival event (arrTime=nil): only <= now is checked as a fallback, real departures are not rejected
     assert(tt.isValidDepartureRecord(2880 * 1000, 2880, nil) == true,
         "arrival-missed fallback accepts a real departure")
     assert(tt.isValidDepartureRecord(1412 * 1000, 2880, nil) == true,
         "arrival-missed fallback cannot distinguish stale (best effort), value <= now accepted")
 
-    -- 场景6：同周期内先到站（10:00=600s），紧接 10:01(601s) 发车 → 接受
+    -- Case 6: arrival earlier in the same cycle (10:00=600s), departure right after at 10:01 (601s) -> accepted
     assert(tt.isValidDepartureRecord(601 * 1000, 601, 600) == true,
         "short-dwell real departure accepted")
     print("  OK: departure record guard rejects stale / accepts real")
 end
 
--- 多套时刻表"选套"回归测试（用户场景）：列车 46:30 到站必须选中第二套(46:30/48:00)，
--- 不选中第一套(22:30/23:30)；且 47:29 时刻仍在第二套（不会跳去别的套）。
+-- Multiple slot sets "set selection" regression test (user scenario): a train arriving at 46:30 must select set 2 (46:30/48:00),
+-- not set 1 (22:30/23:30); and at 47:29 it is still on set 2 (doesn't jump to another set).
 timetableTests[#timetableTests + 1] = function()
     package.loaded["celmi/timetables/timetable_helper"] = {}
     package.loaded[".res.scripts.celmi.timetables.timetable"] = nil
@@ -206,7 +206,7 @@ timetableTests[#timetableTests + 1] = function()
         ["100"] = { stations = { [1] = { conditions = { type = "ArrDep", ArrDep = { {22,30,23,30}, {46,30,48,0} } } } } },
     })
 
-    -- 选套逻辑在 timetable_gui 的 getPlannedArrDep，这里复刻其算法验证"最近到达"选套对用户场景正确：
+    -- Set selection lives in timetable_gui's getPlannedArrDep; this replicates its algorithm to verify "nearest arrival" selection is correct for the user scenario:
     local function pickSet(actualArr)
         local bestArr, bestDep, bestDist = nil, nil, math.huge
         local conds = tt.getConditions(100, 1, "ArrDep")
@@ -223,15 +223,15 @@ timetableTests[#timetableTests + 1] = function()
         return bestArr, bestDep
     end
 
-    local a, d = pickSet(2790)   -- 46:30 到站
+    local a, d = pickSet(2790)   -- 46:30 arrival
     assert(a == 2790 and d == 2880, "arrival 46:30 must pick set2 (46:30/48:00), got arr=" .. tostring(a) .. " dep=" .. tostring(d))
-    a, d = pickSet(2849)         -- 47:29（站内等待中）
+    a, d = pickSet(2849)         -- 47:29 (waiting at the station)
     assert(a == 2790 and d == 2880, "at 47:29 must still be set2, got arr=" .. tostring(a) .. " dep=" .. tostring(d))
     print("  OK: multi-set selection picks set2 for 46:30 arrival")
 end
 
--- 孤儿线路过滤回归测试（用户场景）：删除已安排时刻的线路后，timetableObject 里的孤儿条目
--- （线路实体已不存在）不应出现在车站 Tab（getAllConditionsOfAllStations），并应被 cleanupOrphanLines 清理。
+-- Orphaned line filter regression test (user scenario): after deleting a line that had timetables, orphaned entries in timetableObject
+-- (line entity no longer exists) must not appear in the station tab (getAllConditionsOfAllStations), and must be removed by cleanupOrphanLines.
 timetableTests[#timetableTests + 1] = function()
     local existingLines = { ["100"] = true, ["200"] = true }
     local stubbedApi = {
@@ -260,22 +260,22 @@ timetableTests[#timetableTests + 1] = function()
     tt.setTimetableObject({
         ["100"] = { stations = { [1] = { stationID = 1001, conditions = { type = "ArrDep", ArrDep = { {1,0,2,0} } } } } },
         ["200"] = { stations = { [1] = { stationID = 2001, conditions = { type = "ArrDep", ArrDep = { {3,0,4,0} } } } } },
-        ["999"] = { stations = { [1] = { stationID = 9991, conditions = { type = "ArrDep", ArrDep = { {5,0,6,0} } } } } }, -- 孤儿：线路已删除
-        ["_gwNames"] = { ["gws_x"] = "test" }, -- 非线路条目：保留（不作为线路处理）
+        ["999"] = { stations = { [1] = { stationID = 9991, conditions = { type = "ArrDep", ArrDep = { {5,0,6,0} } } } } }, -- orphan: line deleted
+        ["_gwNames"] = { ["gws_x"] = "test" }, -- non-line entry: kept (not treated as a line)
     })
 
-    -- getAllConditionsOfAllStations 必须过滤孤儿线路 999（车站 Tab 不再显示 "ERROR" 行）
+    -- getAllConditionsOfAllStations must filter out orphaned line 999 (station tab no longer shows "ERROR" rows)
     local all = tt.getAllConditionsOfAllStations()
     assert(all[1001] and all[1001]["100"], "existing line 100 must appear by station")
     assert(all[2001] and all[2001]["200"], "existing line 200 must appear by station")
     assert(all[9991] == nil, "orphan line 999 must be filtered out from station view")
     assert(all[1001]["999"] == nil, "orphan line 999 must not be listed under station 1001/9991")
 
-    -- getAllWaypointData 同样过滤孤儿线路
+    -- getAllWaypointData filters orphaned lines as well
     local wp = tt.getAllWaypointData()
-    -- 999 无 waypointTimes，此处仅确认不崩；主要断言覆盖在上面
+    -- 999 has no waypointTimes; this only checks it doesn't crash; the main assertions are above
 
-    -- cleanupOrphanLines 应删除孤儿条目 999，保留 100/200 与非数字 key（_gwNames）
+    -- cleanupOrphanLines should remove orphaned entry 999 and keep 100/200 and non-numeric keys (_gwNames)
     local removed = tt.cleanupOrphanLines()
     assert(removed == 1, "cleanup must remove exactly 1 orphan line, got " .. tostring(removed))
     local obj = tt.getTimetableObject()
@@ -287,7 +287,7 @@ timetableTests[#timetableTests + 1] = function()
 end
 
 timetableTests[#timetableTests + 1] = function()
-    -- 运行图设置持久化 getter/setter（时间刻度 / 准点判定阈值 / 自动刷新）
+    -- Diagram settings persistence getters/setters (time scale / punctuality threshold / auto refresh)
     local saved = {
         ts = _G._diagramTimeScale,
         pt = _G._diagramPunctThreshold,
@@ -309,7 +309,7 @@ timetableTests[#timetableTests + 1] = function()
     timetable.setDiagramAutoRefresh(true)
     assert(timetable.getDiagramAutoRefresh() == true, "auto refresh true round trip")
 
-    -- 设置必须写入 timetableObject（随存档持久化）；清空 _G 后（模拟读档/模块重载）仍能恢复
+    -- Settings must be written to timetableObject (persisted with the save); after clearing _G (simulating load/module reload) they can still be restored
     local to = timetable.getTimetableObject()
     assert(to._diagramTimeScale == 2 and to._diagramPunctThreshold == 30 and to._diagramAutoRefresh == true,
         "settings must be stored in timetableObject for persistence")
@@ -320,7 +320,7 @@ timetableTests[#timetableTests + 1] = function()
     assert(timetable.getPunctThreshold() == 30, "punct threshold must survive _G reset")
     assert(timetable.getDiagramAutoRefresh() == true, "auto refresh must survive _G reset")
 
-    -- 非法值收拢
+    -- Invalid values are clamped
     timetable.setTimeScale(7)
     assert(timetable.getTimeScale() == 5, "invalid scale 7 must coerce to 5")
     timetable.setTimeScale(99)
@@ -337,7 +337,7 @@ timetableTests[#timetableTests + 1] = function()
 end
 
 timetableTests[#timetableTests + 1] = function()
-    -- 运行方向筛选 getter/setter（_diagramPolylineFilter，all/up/down）
+    -- Running direction filter getter/setter (_diagramPolylineFilter, all/up/down)
     local saved = _G._diagramPolylineFilter
     _G._diagramPolylineFilter = nil
     timetable.setTimetableObject({})
@@ -360,8 +360,8 @@ timetableTests[#timetableTests + 1] = function()
 end
 
 timetableTests[#timetableTests + 1] = function()
-    -- 跨线程同步安全防御：hasLineEntries 判定"表里是否有线路条目"
-    -- 数字/字符串线路 key 命中；设置键（_diagram*）、_gwNames、空表都不命中。
+    -- Cross-thread sync safeguard: hasLineEntries decides "whether the table has line entries"
+    -- Numeric/string line keys match; settings keys (_diagram*), _gwNames and empty tables don't.
     assert(timetable.hasLineEntries({ ["35110"] = {} }) == true, "string line key must count as line entry")
     assert(timetable.hasLineEntries({ [35110] = {} }) == true, "number line key must count as line entry")
     assert(timetable.hasLineEntries({ ["_diagramTimeScale"] = 5, ["_diagramAutoRefresh"] = false }) == false,
@@ -370,7 +370,7 @@ timetableTests[#timetableTests + 1] = function()
     assert(timetable.hasLineEntries({}) == false, "empty table must NOT count as line entries")
     assert(timetable.hasLineEntries(nil) == false, "nil must NOT count as line entries")
 
-    -- hasAnyPreset：任一线路带 dp.presetList 非空才命中；空/无 dp/预设空都不命中
+    -- hasAnyPreset: matches only if some line has a non-empty dp.presetList; empty / no dp / empty presets don't match
     assert(timetable.hasAnyPreset({ ["35110"] = { dp = { presetList = { {id="1",name="x"} } } } }) == true,
         "line with non-empty presetList must count as preset")
     assert(timetable.hasAnyPreset({ ["35110"] = { dp = { presetList = {} } } }) == false,
@@ -383,10 +383,10 @@ timetableTests[#timetableTests + 1] = function()
 end
 
 timetableTests[#timetableTests + 1] = function()
-    -- 数据同步（number→string 迁移）回归测试：旧版 mod 用数字 key 存线路时刻，
-    -- migrateNumberLineKeys 应迁移到字符串 key，且追加不覆盖（多套时刻全保留），
-    -- 非线路字符串 key（_gwNames 等）原样保留，报告里每站"新增套数"正确。
-    -- 场景1：纯 number 存档 → 迁移后 string 可读、number 清空、报告计数正确
+    -- Data sync (number->string migration) regression test: the old mod stored line timetables with numeric keys;
+    -- migrateNumberLineKeys should migrate them to string keys, appending without overwriting (all slot sets kept),
+    -- non-line string keys (_gwNames etc.) are kept as is, and the per-station "added sets" counts in the report are correct.
+    -- Case 1: pure number save -> after migration string keys are readable, number keys cleared, report counts correct
     timetable.setTimetableObject({
         [100] = { hasTimetable = true, stations = {
             [1] = { stationID = 1001, conditions = { type = "ArrDep", ArrDep = { {1,0,2,0}, {3,0,4,0} } } },
@@ -401,7 +401,7 @@ timetableTests[#timetableTests + 1] = function()
     assert(r.totalSlots == 3, "totalSlots must be 3, got " .. tostring(r.totalSlots))
     assert(r.lines["100"][1] == 2 and r.lines["100"][2] == 1, "per-station added counts correct")
 
-    -- 场景2：number+string 并存 → 追加不覆盖，string 原有数据保留，_gwNames 原样保留
+    -- Case 2: number and string coexist -> append without overwriting, existing string data kept, _gwNames kept as is
     timetable.setTimetableObject({
         [100] = { hasTimetable = true, stations = {
             [1] = { conditions = { type = "ArrDep", ArrDep = { {1,0,2,0} } } },
@@ -424,7 +424,7 @@ timetableTests[#timetableTests + 1] = function()
     assert(r2.lines["100"][1] == 1 and r2.lines["100"][2] == 1, "report per-station counts for both-exist case")
     assert(r2.totalSlots == 2, "totalSlots must be 2, got " .. tostring(r2.totalSlots))
 
-    -- 场景3：无 number → 幂等，totalSlots == 0，纯 string 表不变
+    -- Case 3: no number keys -> idempotent, totalSlots == 0, pure string table unchanged
     timetable.setTimetableObject({
         ["200"] = { stations = { [1] = { conditions = { type = "ArrDep", ArrDep = { {1,0,2,0} } } } } },
     })
@@ -434,25 +434,25 @@ timetableTests[#timetableTests + 1] = function()
     print("  OK: migrateNumberLineKeys (number→string append migration + report)")
 end
 
--- 控车开关回归测试（用户反馈）：线路未勾选"遵循时刻表"（hasTimetable=false）时，
--- waitingRequired 必须返回 false（不扣车），即使该线路残留车站时刻数据。
--- 此前没有 hasTimetable 判定 → 未勾选线路的列车到站后被 setVehicleManualDeparture(true)
--- 硬扣、永远不发车（只有勾选再取消勾选瞬间 startAllLineVehicles 才放行 → 玩家看到
--- "取消勾选才发车"）。用户定稿：不打勾就按游戏默认装卸车后正常发车，打勾才控车。
+-- Vehicle control switch regression test (user report): when a line doesn't have "follow timetable" ticked (hasTimetable=false),
+-- waitingRequired must return false (don't hold), even if the line has leftover station time data.
+-- Previously there was no hasTimetable check -> trains of unticked lines were held via setVehicleManualDeparture(true) after arrival
+-- and never departed (only the moment of ticking and unticking let startAllLineVehicles release them -> players saw
+-- "departs only after unticking"). Final user decision: unticked lines load/unload and depart as the game does by default; only ticked lines are controlled.
 timetableTests[#timetableTests + 1] = function()
-    local mockTime = 3600 * 13 + 300   -- 13:05（发车 13:10 未到 → 旧逻辑会扣车等发车时刻）
+    local mockTime = 3600 * 13 + 300   -- 13:05 (departure 13:10 not reached -> the old logic would hold until the departure time)
     local forceCalls = 0
     package.loaded["celmi/timetables/timetable_helper"] = {
         getTime = function() return mockTime end,
         getCurrentLine = function() return 100 end,
         getCurrentStation = function() return 1 end,
-        getTimeUntilDeparture = function() return 3 end,  -- 关门倒计时 <5，进入 ArrDep 判定
+        getTimeUntilDeparture = function() return 3 end,  -- door-closing countdown <5, enters the ArrDep check
         forceDeparture = function() forceCalls = forceCalls + 1 end,
     }
     package.loaded[".res.scripts.celmi.timetables.timetable"] = nil
     local tt = require ".res.scripts.celmi.timetables.timetable"
 
-    -- 场景1：线路存在但未勾选（hasTimetable=false），站内有 ArrDep 残留数据 → 不扣车、不强制发车
+    -- Case 1: line exists but unticked (hasTimetable=false), leftover ArrDep data at the station -> not held, no forced departure
     tt.setTimetableObject({
         ["100"] = { hasTimetable = false, stations = { [1] = { conditions = { type = "ArrDep", ArrDep = { {0,0,10,0} } } } } },
     })
@@ -460,12 +460,12 @@ timetableTests[#timetableTests + 1] = function()
     assert(tt.waitingRequired("V1") == false, "unchecked line must not hold the train")
     assert(forceCalls == 0, "unchecked line must not forceDeparture either")
 
-    -- 场景2：线路没有时刻表条目（从未安排过时刻）→ 不扣车
+    -- Case 2: line has no timetable entries (never scheduled) -> not held
     tt.setTimetableObject({})
     tt.setCurrentlyWaiting({})
     assert(tt.waitingRequired("V1") == false, "line without timetable entry must not hold the train")
 
-    -- 场景3：勾选（hasTimetable=true）+ 发车时刻未到 → 正常扣车（对照：勾选才控车）
+    -- Case 3: ticked (hasTimetable=true) + departure time not reached -> held normally (contrast: only ticked lines are controlled)
     tt.setTimetableObject({
         ["100"] = { hasTimetable = true, stations = { [1] = { conditions = { type = "ArrDep", ArrDep = { {0,0,10,0} } } } } },
     })
@@ -474,9 +474,9 @@ timetableTests[#timetableTests + 1] = function()
     print("  OK: unchecked line not controlled (hasTimetable gate)")
 end
 
--- 残留扣车清理回归（2026-08-16 诊断）：旧版 mod 设置的 manualDeparture 标志随存档持久化，
--- 未勾选但有条目的线路车辆 autoDeparture=false → clearStaleHolds 必须清掉；
--- 勾选线路 / 无条目线路 / 已 autoDeparture=true 的车辆一律不动。
+-- Leftover hold cleanup regression (2026-08-16 diagnosis): the manualDeparture flag set by old mod versions is persisted with the save;
+-- vehicles of unticked lines with entries have autoDeparture=false -> clearStaleHolds must clear it;
+-- vehicles of ticked lines / lines without entries / with autoDeparture=true already are left alone.
 timetableTests[#timetableTests + 1] = function()
     local cmdCalls = {}
     local fleetScanCalls = 0
@@ -493,12 +493,12 @@ timetableTests[#timetableTests + 1] = function()
             end,
             system = {
                 transportVehicleSystem = {
-                    -- 性能优化 A 组（2026-08-16 第 21 轮）：clearStaleHolds 已改成"候选驱动"——
-                    -- 先纯 Lua 找"有条目但未勾选"的线路，再按线路取车；不再扫全世界停站车辆。
+                    -- Performance optimization group A (2026-08-16, round 21): clearStaleHolds is now "candidate driven" --
+                    -- it first finds lines "with entries but unticked" in plain Lua, then fetches vehicles per line; no more scanning all vehicles at stations worldwide.
                     getLineVehicles = function(line)
                         if line == 100 then return { 10, 11 } end
                         if line == 200 then return { 20, 21 } end
-                        return { 30 }   -- 线路300 无条目 → 无候选，不该被查到
+                        return { 30 }   -- line 300 has no entries -> no candidate, must not be queried
                     end,
                     getVehiclesWithState = function() fleetScanCalls = fleetScanCalls + 1 return { 10, 11, 20, 30 } end,
                 },
@@ -517,20 +517,20 @@ timetableTests[#timetableTests + 1] = function()
     package.loaded[".res.scripts.celmi.timetables.timetable"] = nil
     local tt = require ".res.scripts.celmi.timetables.timetable"
     tt.setTimetableObject({
-        ["100"] = { hasTimetable = true, stations = {} },   -- 勾选：不动（协程正常控车）
-        ["200"] = { hasTimetable = false, stations = {} },  -- 未勾选+有条目：清
-        -- 300 无条目：不清（本 mod 从未扣过它）
+        ["100"] = { hasTimetable = true, stations = {} },   -- ticked: left alone (controlled normally by the coroutine)
+        ["200"] = { hasTimetable = false, stations = {} },  -- unticked + has entries: clear
+        -- 300 has no entries: not cleared (this mod never held it)
     })
     local n = tt.clearStaleHolds()
-    -- 10: 线路100 勾选 → 不清；11: 线路100 勾选 → 不清（autoDeparture=true 也不清）
-    -- 20: 线路200 未勾选 + autoDeparture=false → 清；21: 同线但 autoDeparture=true → 不清
-    -- 30: 线路300 无条目 → 不清
+    -- 10: line 100 ticked -> not cleared; 11: line 100 ticked -> not cleared (autoDeparture=true is not cleared either)
+    -- 20: line 200 unticked + autoDeparture=false -> cleared; 21: same line but autoDeparture=true -> not cleared
+    -- 30: line 300 has no entries -> not cleared
     assert(n == 1, "exactly 1 stale hold cleared, got " .. tostring(n))
     assert(#cmdCalls == 1 and cmdCalls[1][1] == 20 and cmdCalls[1][2] == false,
         "clearStaleHolds must send setVehicleManualDeparture(20, false)")
     assert(fleetScanCalls == 0, "candidate-driven clearStaleHolds must not scan the whole fleet, got "
         .. tostring(fleetScanCalls))
-    -- 无候选时零成本：把所有条目改成已勾选 → 不该有任何 getLineVehicles / 车队扫描
+    -- Zero cost without candidates: mark all entries as ticked -> there must be no getLineVehicles / fleet scan at all
     tt.setTimetableObject({ ["100"] = { hasTimetable = true, stations = {} } })
     local n2 = tt.clearStaleHolds()
     assert(n2 == 0 and fleetScanCalls == 0, "no candidate lines → no scan at all")
@@ -538,10 +538,10 @@ timetableTests[#timetableTests + 1] = function()
     _G.api = prevApi
 end
 
--- 5s 维护合并回归（性能优化 A 组）：maintainTimetableData 必须
---   * 只取一次 getLines()；
---   * 用它同时完成孤儿清理与车站对账（对账不再逐线 entityExists）；
---   * 返回值语义与原来两次调用一致（removed 数 + 对账 stats）。
+-- Merged 5s maintenance regression (performance optimization group A): maintainTimetableData must
+--   * call getLines() only once;
+--   * use it for both orphan cleanup and station reconciliation (no more entityExists per line);
+--   * return values with the same semantics as the two original calls (removed count + reconciliation stats).
 timetableTests[#timetableTests + 1] = function()
     local getLinesCalls, entityExistsCalls = 0, 0
     local prevApi = _G.api
@@ -558,7 +558,7 @@ timetableTests[#timetableTests + 1] = function()
             end,
             system = {
                 lineSystem = {
-                    getLines = function() getLinesCalls = getLinesCalls + 1 return { 100 } end,  -- 999 是孤儿
+                    getLines = function() getLinesCalls = getLinesCalls + 1 return { 100 } end,  -- 999 is an orphan
                 },
             },
         },
@@ -569,10 +569,10 @@ timetableTests[#timetableTests + 1] = function()
     local tt = require ".res.scripts.celmi.timetables.timetable"
     tt.setTimetableObject({
         ["100"] = { hasTimetable = true, stations = {
-            [2] = { stationID = 1002, conditions = { type = "ArrDep", ArrDep = { {3,0,4,0} } } },  -- 挪到 2
-            [5] = { stationID = 1001, conditions = { type = "ArrDep", ArrDep = { {1,0,2,0} } } },  -- 挪到 1
+            [2] = { stationID = 1002, conditions = { type = "ArrDep", ArrDep = { {3,0,4,0} } } },  -- moves to 2
+            [5] = { stationID = 1001, conditions = { type = "ArrDep", ArrDep = { {1,0,2,0} } } },  -- moves to 1
         } },
-        ["999"] = { hasTimetable = true, stations = {} },   -- 线路已删 → 孤儿，应清掉
+        ["999"] = { hasTimetable = true, stations = {} },   -- line deleted -> orphan, should be removed
     })
     tt.setCurrentlyWaiting({})
     local removed, stats = tt.maintainTimetableData()
@@ -591,13 +591,13 @@ timetableTests[#timetableTests + 1] = function()
     _G.api = prevApi
 end
 
--- 车站/线路结构对账回归（2026-08-16 方案定稿）：拆站后游戏把线路停站重新编号，
--- 时刻数据按位置存储会错位。reconcileStationData 必须：
---   * 幸存站（stationID 还在线路上）数据归位到新位置（时刻内容不变）；
---   * 被拆站（stationID 不在线路上）数据删除；
---   * 无 stationID 的老数据删除；
---   * 环线同站组多次出现按顺序配对；
---   * 被删位置的 currentlyWaiting 残留清掉。
+-- Station/line structure reconciliation regression (2026-08-16 final design): after removing a station the game renumbers the line's stops,
+-- and time data stored by position becomes misaligned. reconcileStationData must:
+--   * move data of surviving stations (stationID still on the line) to their new position (time content unchanged);
+--   * delete data of removed stations (stationID not on the line);
+--   * delete old data without stationID;
+--   * pair repeated occurrences of the same station group on loop lines in order;
+--   * clear currentlyWaiting leftovers of deleted positions.
 timetableTests[#timetableTests + 1] = function()
     local prevApi = _G.api
     _G.api = {
@@ -606,11 +606,11 @@ timetableTests[#timetableTests + 1] = function()
             getComponent = function(id, ctype)
                 if ctype == 60 then  -- LINE
                     if id == 100 then
-                        -- 原 A B C D E，C(1003) 被拆 → 现 A B D E
+                        -- originally A B C D E, C(1003) removed -> now A B D E
                         return { stops = { [1] = { stationGroup = 1001 }, [2] = { stationGroup = 1002 },
                                            [3] = { stationGroup = 1004 }, [4] = { stationGroup = 1005 } } }
                     elseif id == 200 then
-                        -- 环线：同站组 2001 出现两次（位置1/2），2002 一次
+                        -- loop line: station group 2001 appears twice (positions 1/2), 2002 once
                         return { stops = { [1] = { stationGroup = 2001 }, [2] = { stationGroup = 2001 },
                                            [3] = { stationGroup = 2002 } } }
                     end
@@ -627,15 +627,15 @@ timetableTests[#timetableTests + 1] = function()
         ["100"] = { hasTimetable = true, stations = {
             [1] = { stationID = 1001, conditions = { type = "ArrDep", ArrDep = { {1,0,2,0} } } },
             [2] = { stationID = 1002, conditions = { type = "ArrDep", ArrDep = { {3,0,4,0} } } },
-            [3] = { stationID = 1003, conditions = { type = "ArrDep", ArrDep = { {5,0,6,0} } } },  -- 被拆
-            [4] = { stationID = 1004, conditions = { type = "ArrDep", ArrDep = { {7,0,8,0} } } },  -- 挪到 3
-            [5] = { stationID = 1005, conditions = { type = "ArrDep", ArrDep = { {9,0,10,0} } } }, -- 挪到 4
-            [6] = { noSid = true },  -- 无 stationID 老数据 → 删
+            [3] = { stationID = 1003, conditions = { type = "ArrDep", ArrDep = { {5,0,6,0} } } },  -- removed
+            [4] = { stationID = 1004, conditions = { type = "ArrDep", ArrDep = { {7,0,8,0} } } },  -- moves to 3
+            [5] = { stationID = 1005, conditions = { type = "ArrDep", ArrDep = { {9,0,10,0} } } }, -- moves to 4
+            [6] = { noSid = true },  -- old data without stationID -> delete
         } },
         ["200"] = { hasTimetable = true, stations = {
             [2] = { stationID = 2001, conditions = { type = "ArrDep", ArrDep = { {11,0,12,0} } } },
             [5] = { stationID = 2001, conditions = { type = "ArrDep", ArrDep = { {13,0,14,0} } } },
-            [7] = { stationID = 2004, conditions = { type = "ArrDep", ArrDep = { {15,0,16,0} } } }, -- 已不在环线 → 删
+            [7] = { stationID = 2004, conditions = { type = "ArrDep", ArrDep = { {15,0,16,0} } } }, -- no longer on the loop line -> delete
         } },
     })
     tt.setCurrentlyWaiting({
@@ -648,7 +648,7 @@ timetableTests[#timetableTests + 1] = function()
 
     assert(stats.rekeyed == 4, "rekeyed should be 4 (D,E on 100 + 2 on 200), got " .. tostring(stats.rekeyed))
     assert(stats.removed == 3, "removed should be 3 (C, noSid, 2004), got " .. tostring(stats.removed))
-    -- 线路100
+    -- Line 100
     assert(obj["100"].stations[1].stationID == 1001, "A stays at 1")
     assert(obj["100"].stations[2].stationID == 1002, "B stays at 2")
     assert(obj["100"].stations[3] and obj["100"].stations[3].stationID == 1004, "D rekeyed to 3")
@@ -656,27 +656,27 @@ timetableTests[#timetableTests + 1] = function()
     assert(obj["100"].stations[3].conditions.ArrDep[1][1] == 7, "D's times preserved")
     assert(obj["100"].stations[4].conditions.ArrDep[1][1] == 9, "E's times preserved")
     assert(obj["100"].stations[5] == nil and obj["100"].stations[6] == nil, "C and noSid removed")
-    -- 线路200 环线配对
+    -- Line 200 loop pairing
     assert(obj["200"].stations[1] and obj["200"].stations[1].stationID == 2001, "2001 first → 1")
     assert(obj["200"].stations[2] and obj["200"].stations[2].stationID == 2001, "2001 second → 2")
     assert(obj["200"].stations[1].conditions.ArrDep[1][1] == 11, "first 2001 times preserved")
     assert(obj["200"].stations[2].conditions.ArrDep[1][1] == 13, "second 2001 times preserved")
     assert(obj["200"].stations[7] == nil, "2004 (off line) removed")
-    -- currentlyWaiting 残留：被删位置 3 清掉
+    -- currentlyWaiting leftovers: deleted position 3 is cleared
     local cw = tt.getCurrentlyWaiting()
     assert(cw["100"].stations[3] == nil, "currentlyWaiting for removed pos 3 cleared")
     _G.api = prevApi
     print("  OK: reconcileStationData (rekey / drop deleted / noSid / loop pairing)")
 end
 
--- 读取校验回归（2026-08-16 方案定稿）：拆/建站后两次对账之间的窗口期，
--- waitingRequired 必须拒绝"位置错位"的数据（存档 stationID ≠ 当前位置真实车站 → 不扣车）。
+-- Read validation regression (2026-08-16 final design): in the window between two reconciliations after removing/building stations,
+-- waitingRequired must reject "misaligned" data (saved stationID ~= actual station at the current position -> not held).
 timetableTests[#timetableTests + 1] = function()
-    local mockTime = 3600 * 13 + 300   -- 13:05（发车 13:10 未到 → 正常会扣车）
+    local mockTime = 3600 * 13 + 300   -- 13:05 (departure 13:10 not reached -> would normally be held)
     local mockLine = 100
     local mockStop = 1
     local forceCalls = 0
-    local mockLiveSid = 1002  -- 当前位置真实车站（与存档 stationID=1001 不符 → 应拒绝）
+    local mockLiveSid = 1002  -- actual station at the current position (doesn't match saved stationID=1001 -> should be rejected)
     package.loaded["celmi/timetables/timetable_helper"] = {
         getTime = function() return mockTime end,
         getCurrentLine = function() return mockLine end,
@@ -692,25 +692,25 @@ timetableTests[#timetableTests + 1] = function()
     })
     tt.setCurrentlyWaiting({})
 
-    -- 场景1：存档 stationID=1001 ≠ 当前位置 1002 → 拒绝（不扣车、不强制发车）
+    -- Case 1: saved stationID=1001 ~= current position 1002 -> rejected (not held, no forced departure)
     assert(tt.waitingRequired("V1") == false, "mismatched stationID must not hold the train")
     assert(forceCalls == 0, "mismatched stationID must not forceDeparture")
 
-    -- 场景2：一致 → 正常扣车到发车时刻
+    -- Case 2: match -> held until the departure time as usual
     mockLiveSid = 1001
     tt.setCurrentlyWaiting({})
     assert(tt.waitingRequired("V1") == true, "matched stationID must hold until departure")
     print("  OK: waitingRequired rejects position-mismatched station data")
 end
 
--- 自动时刻间隔生成辅助回归（2026-08-16 功能）：
--- shiftTime 平移（模1小时/绕小时）、shiftSlot 整槽平移、removeAllConditions 清空保留 type。
+-- Auto-generate slots by interval helpers regression (2026-08-16 feature):
+-- shiftTime shifting (modulo 1 hour/wrapping around the hour), shiftSlot whole-slot shifting, removeAllConditions clears but keeps type.
 timetableTests[#timetableTests + 1] = function()
     package.loaded["celmi/timetables/timetable_helper"] = {}
     package.loaded[".res.scripts.celmi.timetables.timetable"] = nil
     local tt = require ".res.scripts.celmi.timetables.timetable"
 
-    -- shiftTime：平移 + 跨小时回绕（0-59 分）
+    -- shiftTime: shift + wrap around the hour (minutes 0-59)
     local a = tt.shiftTime({0, 0}, 60)
     assert(a[1] == 1 and a[2] == 0, "0:00 + 1m = 1:00")
     local b = tt.shiftTime({59, 30}, 60)
@@ -718,12 +718,12 @@ timetableTests[#timetableTests + 1] = function()
     local c = tt.shiftTime({28, 45}, 60 * 30)
     assert(c[1] == 58 and c[2] == 45, "28:45 + 30m = 58:45")
 
-    -- shiftSlot：{0,0,10,0} + 10min → {10,0,20,0}
+    -- shiftSlot: {0,0,10,0} + 10min -> {10,0,20,0}
     local s = tt.shiftSlot({0, 0, 10, 0}, 10 * 60)
     assert(s[1] == 10 and s[2] == 0 and s[3] == 20 and s[4] == 0,
         "shiftSlot +10min: " .. s[1] .. ":" .. s[2] .. "-" .. s[3] .. ":" .. s[4])
 
-    -- removeAllConditions：清空 ArrDep 数组，保留 conditions.type=ArrDep
+    -- removeAllConditions: clears the ArrDep array, keeps conditions.type=ArrDep
     tt.setTimetableObject({
         ["100"] = { stations = { [1] = { conditions = { type = "ArrDep", ArrDep = { {1,0,2,0}, {3,0,4,0} } } } } },
     })
@@ -734,19 +734,19 @@ timetableTests[#timetableTests + 1] = function()
     print("  OK: shiftTime / shiftSlot / removeAllConditions (auto-interval helpers)")
 end
 
--- 线路控车开关回归（2026-08-16 功能，跟进 3625975189）：到点发车 / 最小停站时间 / 最大停站时间。
---   * getter 默认：无条目 / 旧档缺字段 → force=true、min/max=false；
---   * setter 往返 + 持久化到 timetableObject[line]；
---   * force=true（默认）：晚点容差内放行 = 强发（forceDeparture 被调），且 min/max 即使勾选也被忽略；
---   * force=false：同一场景放行 = 普通放行（forceDeparture 不被调，引擎装完才走）；
---   * force=false + Min：到站+minWaitingTime 未满 → 继续扣；满 → 普通放行；
---   * force=false + Max：到站+maxWaitingTime → 晚点超容差也强发（max 覆盖"扣到下一趟"）；
---   * force=false + 无 min/max + 晚点超容差 → 仍扣到下一趟（force=false ≠ 一律放行）。
+-- Per-line vehicle control switch regression (2026-08-16 feature, following 3625975189): depart on time / minimum dwell time / maximum dwell time.
+--   * getter defaults: no entry / old save missing fields -> force=true, min/max=false;
+--   * setter round trip + persisted to timetableObject[line];
+--   * force=true (default): release within delay tolerance = forced departure (forceDeparture called), and min/max are ignored even if ticked;
+--   * force=false: same scenario releases normally (forceDeparture not called, the engine leaves when loading is done);
+--   * force=false + Min: arrival+minWaitingTime not reached -> keep holding; reached -> normal release;
+--   * force=false + Max: at arrival+maxWaitingTime -> forced departure even when late beyond tolerance (max overrides "hold until the next run");
+--   * force=false + no min/max + late beyond tolerance -> still held until the next run (force=false ~= always release).
 timetableTests[#timetableTests + 1] = function()
-    local mockTime = 3600 * 13 + 300         -- 13:05（基准，每场景前覆写）
+    local mockTime = 3600 * 13 + 300         -- 13:05 (baseline, overwritten before each case)
     local mockLine = 100
     local mockStop = 1
-    local mockDoorsArrival = 3600 * 13 + 60  -- 车辆到站时刻（doorsTime 微秒），min/max 判点基准
+    local mockDoorsArrival = 3600 * 13 + 60  -- vehicle arrival time (doorsTime, microseconds), reference for min/max checks
     local dwellMin = 0
     local dwellMax = 0
     local forceCalls = 0
@@ -754,7 +754,7 @@ timetableTests[#timetableTests + 1] = function()
         getTime = function() return mockTime end,
         getCurrentLine = function() return mockLine end,
         getCurrentStation = function() return mockStop end,
-        getTimeUntilDeparture = function() return 3 end,  -- 关门倒计时 <5s：门控不提前放行
+        getTimeUntilDeparture = function() return 3 end,  -- door-closing countdown <5s: the gate doesn't release early
         getStationID = function() return 1001 end,
         forceDeparture = function() forceCalls = forceCalls + 1 end,
     }
@@ -763,9 +763,9 @@ timetableTests[#timetableTests + 1] = function()
         engine = {
             entityExists = function() return true end,
             getComponent = function(id, ctype)
-                if ctype == 60 then  -- LINE：引擎 Line.Stop 原生驻留上下限
+                if ctype == 60 then  -- LINE: the engine's native Line.Stop dwell limits
                     return { stops = { [1] = { minWaitingTime = dwellMin, maxWaitingTime = dwellMax } } }
-                elseif ctype == 70 then  -- TRANSPORT_VEHICLE：doorsTime（微秒）
+                elseif ctype == 70 then  -- TRANSPORT_VEHICLE: doorsTime (microseconds)
                     return { doorsTime = mockDoorsArrival * 1000000 }
                 end
                 return nil
@@ -775,9 +775,9 @@ timetableTests[#timetableTests + 1] = function()
     }
     package.loaded[".res.scripts.celmi.timetables.timetable"] = nil
     local tt = require ".res.scripts.celmi.timetables.timetable"
-    tt.setDelayTolerance(300)  -- 显式 5 分钟，防 _G 残留干扰
+    tt.setDelayTolerance(300)  -- explicitly 5 minutes, guards against leftovers in _G
 
-    -- 1) getter 默认（无条目 / 旧档缺字段）
+    -- 1) getter defaults (no entry / old save missing fields)
     tt.setTimetableObject({})
     assert(tt.getForceDepartureEnabled(100) == true, "default forceDeparture must be true")
     assert(tt.getMinWaitEnabled(100) == false, "default minWait must be false")
@@ -786,7 +786,7 @@ timetableTests[#timetableTests + 1] = function()
     assert(tt.getForceDepartureEnabled(100) == true, "old save (no field): forceDeparture default true")
     assert(tt.getMinWaitEnabled(100) == false, "old save (no field): minWait default false")
 
-    -- 2) setter 往返 + 持久化
+    -- 2) setter round trip + persistence
     tt.setForceDepartureEnabled(100, false)
     tt.setMinWaitEnabled(100, true)
     tt.setMaxWaitEnabled(100, true)
@@ -797,8 +797,8 @@ timetableTests[#timetableTests + 1] = function()
     assert(savedEntry.forceDeparture == false and savedEntry.minWaitEnabled == true and savedEntry.maxWaitEnabled == true,
         "line switches must persist in timetableObject[line]")
 
-    -- ===== waitingRequired 行为 =====
-    -- 时刻槽 {10,0,10,0}：13:10 到、13:10 发（模小时）→ 绝对发车 13:10:00（= 46800+600 = 47400s）
+    -- ===== waitingRequired behavior =====
+    -- Time slot {10,0,10,0}: arrival 13:10, departure 13:10 (modulo hour) -> absolute departure 13:10:00 (= 46800+600 = 47400s)
     local function objWith(force, min, max)
         return { ["100"] = { hasTimetable = true, forceDeparture = force, minWaitEnabled = min, maxWaitEnabled = max,
             stations = { [1] = { stationID = 1001,
@@ -809,37 +809,37 @@ timetableTests[#timetableTests + 1] = function()
         forceCalls = 0
     end
 
-    -- 3) force=true（且 min/max 也勾着）→ min/max 被忽略，晚点容差内到点强发
+    -- 3) force=true (with min/max also ticked) -> min/max ignored, forced departure on time within delay tolerance
     tt.setTimetableObject(objWith(true, true, true))
-    mockTime = 3600 * 13 + 645   -- 13:10:45（晚点 45s ≤ 容差 300）
+    mockTime = 3600 * 13 + 645   -- 13:10:45 (45s late <= tolerance 300)
     resetWaiting()
     assert(tt.waitingRequired("V1") == false, "force=true late-within-tolerance must release")
     assert(forceCalls == 1, "force=true release must forceDeparture (got " .. tostring(forceCalls) .. ")")
 
-    -- 4) force=false（min/max 关）→ 同一场景普通放行，不强发
+    -- 4) force=false (min/max off) -> same scenario releases normally, no forced departure
     tt.setTimetableObject(objWith(false, false, false))
     mockTime = 3600 * 13 + 645
     resetWaiting()
     assert(tt.waitingRequired("V1") == false, "force=false late-within-tolerance must release")
     assert(forceCalls == 0, "force=false release must NOT forceDeparture (engine loads then leaves)")
 
-    -- 5) force=false + Min：到站 13:10:30 + min 120s = 13:12:30 前继续扣（装完判点未满）
+    -- 5) force=false + Min: arrival 13:10:30 + min 120s = keep holding before 13:12:30 (minimum not reached when loading is done)
     tt.setTimetableObject(objWith(false, true, false))
-    mockDoorsArrival = 3600 * 13 + 630   -- 13:10:30 到站
+    mockDoorsArrival = 3600 * 13 + 630   -- 13:10:30 arrival
     dwellMin = 120
-    mockTime = 3600 * 13 + 690   -- 13:11:30（晚点 90s 容差内，但 min 未满）
+    mockTime = 3600 * 13 + 690   -- 13:11:30 (90s late, within tolerance, but min not reached)
     resetWaiting()
     assert(tt.waitingRequired("V1") == true, "min not satisfied must keep holding")
     assert(forceCalls == 0, "min hold must not forceDeparture")
 
-    -- 6) 同配置 min 已满（13:12:45 ≥ 13:12:30）→ 普通放行
+    -- 6) Same config, min reached (13:12:45 >= 13:12:30) -> normal release
     mockTime = 3600 * 13 + 765   -- 13:12:45
     resetWaiting()
     assert(tt.waitingRequired("V1") == false, "min satisfied must release")
     assert(forceCalls == 0, "min satisfied release must be plain (no forceDeparture)")
 
-    -- 7) force=false + Max：到站 13:10:30 + max 300s = 13:15:30；13:16:00（晚点 360s 超容差）
-    --    → max 覆盖"扣到下一趟"，到点强发
+    -- 7) force=false + Max: arrival 13:10:30 + max 300s = 13:15:30; 13:16:00 (360s late, beyond tolerance)
+    --    -> max overrides "hold until the next run", forced departure on time
     tt.setTimetableObject(objWith(false, true, true))
     mockDoorsArrival = 3600 * 13 + 630
     dwellMin = 120
@@ -849,9 +849,9 @@ timetableTests[#timetableTests + 1] = function()
     assert(tt.waitingRequired("V1") == false, "max reached must release even beyond tolerance")
     assert(forceCalls == 1, "max reached must forceDeparture (got " .. tostring(forceCalls) .. ")")
 
-    -- 8) force=false + 无 min/max + 晚点超容差 → 仍扣到下一趟（不是一律放行）
+    -- 8) force=false + no min/max + late beyond tolerance -> still held until the next run (not always released)
     tt.setTimetableObject(objWith(false, false, false))
-    mockTime = 3600 * 13 + 960   -- 13:16:00，晚点 360s > 容差 300
+    mockTime = 3600 * 13 + 960   -- 13:16:00, 360s late > tolerance 300
     resetWaiting()
     assert(tt.waitingRequired("V1") == true, "late beyond tolerance (force=false) must hold to next slot")
     assert(forceCalls == 0, "beyond-tolerance hold must not forceDeparture")
@@ -860,16 +860,16 @@ timetableTests[#timetableTests + 1] = function()
     print("  OK: line control switches (force departure / min wait / max wait)")
 end
 
--- 最大停站时间语义精化回归（2026-08-16 玩家拍板）：max 不是"到站+M 无脑强发"，而是
---   ① 到站满 M 仍滞留（该趟发车时刻已过：超容差等下一趟/装卸拖过点）→ 强发；
---   ② 发车点前到达、扣着等到点的车，点到即走 → 强发（到点掐装卸）；
---   发车时刻没到 → 绝不提前强发（早到等到点，不早发）；
---   晚点但装得快（容差内）→ 普通放行"装完就走"，max 不兜底。
+-- Maximum dwell time semantics refinement regression (2026-08-16 player decision): max is not "blindly force departure at arrival+M", but
+--   (1) still at the station M after arrival (this run's departure time passed: beyond tolerance waiting for the next run / loading ran past the time) -> forced departure;
+--   (2) vehicles that arrived before the departure time and are held until then leave as soon as the time comes -> forced departure (loading cut short on time);
+--   departure time not reached -> never force departure early (early vehicles wait for their time, no early departures);
+--   late but loading quickly (within tolerance) -> normal release "leave when loaded"; max doesn't cover this.
 timetableTests[#timetableTests + 1] = function()
     local mockTime = 3600 * 13 + 300
     local mockLine = 100
     local mockStop = 1
-    local mockDoorsArrival = 3600 * 13  -- 到站时刻（doorsTime 微秒）
+    local mockDoorsArrival = 3600 * 13  -- arrival time (doorsTime, microseconds)
     local dwellMin = 0
     local dwellMax = 0
     local forceCalls = 0
@@ -902,46 +902,46 @@ timetableTests[#timetableTests + 1] = function()
     local function objWith(force, min, max)
         return { ["100"] = { hasTimetable = true, forceDeparture = force, minWaitEnabled = min, maxWaitEnabled = max,
             stations = { [1] = { stationID = 1001,
-                conditions = { type = "ArrDep", ArrDep = { {10,0,10,0} } } } } } }  -- 13:10 发（绝对 47400）
+                conditions = { type = "ArrDep", ArrDep = { {10,0,10,0} } } } } } }  -- 13:10 departure (absolute 47400)
     end
     local function resetWaiting()
         tt.setCurrentlyWaiting({})
         forceCalls = 0
     end
 
-    -- A) max✓ + 早到 10 分钟（13:00 到，M=180s）：13:05:30 已到站+M，但发车时刻 13:10 未到
-    --    → 绝不提前强发，继续扣到发车时刻（这是对"旧实现 13:03 就强发"的核心修正）
+    -- A) max ticked + 10 minutes early (arrival 13:00, M=180s): at 13:05:30 arrival+M has passed, but departure time 13:10 not reached
+    --    -> never force departure early, keep holding until the departure time (the core fix of "the old implementation forced departure at 13:03")
     tt.setTimetableObject(objWith(false, false, true))
-    mockDoorsArrival = 3600 * 13          -- 13:00:00 到站
+    mockDoorsArrival = 3600 * 13          -- 13:00:00 arrival
     dwellMax = 180
     mockTime = 3600 * 13 + 330            -- 13:05:30
     resetWaiting()
     assert(tt.waitingRequired("V1") == true, "early arrival past arrival+M but before dep point must keep holding")
     assert(forceCalls == 0, "early arrival must NOT be force-departed before its departure point")
 
-    -- B) 同配置，到发车时刻后 5s（13:10:05，delay=5 ≤ 容差）→ 到点强发（掐装卸）
+    -- B) Same config, 5s after the departure time (13:10:05, delay=5 <= tolerance) -> forced departure on time (loading cut short)
     mockTime = 3600 * 13 + 605
     resetWaiting()
     assert(tt.waitingRequired("V1") == false, "dep point reached (held train) must release")
     assert(forceCalls == 1, "max: at-departure release must forceDeparture (got " .. tostring(forceCalls) .. ")")
 
-    -- C) max✓ + 晚点 2 分钟但装得快（13:12 到，发车点 13:10 已过，容差内）→ 普通放行不强发
-    --    （max 不兜"晚点但装完即走"，玩家拍板）
+    -- C) max ticked + 2 minutes late but loading quickly (arrival 13:12, departure 13:10 passed, within tolerance) -> normal release, no forced departure
+    --    (max doesn't cover "late but leaves once loaded", player decision)
     tt.setTimetableObject(objWith(false, false, true))
-    mockDoorsArrival = 3600 * 13 + 720    -- 13:12:00 到站
-    mockTime = 3600 * 13 + 750            -- 13:12:30（关门判点；到站+M=13:15 未到）
+    mockDoorsArrival = 3600 * 13 + 720    -- 13:12:00 arrival
+    mockTime = 3600 * 13 + 750            -- 13:12:30 (door-closing check; arrival+M=13:15 not reached)
     resetWaiting()
     assert(tt.waitingRequired("V1") == false, "late within tolerance + fast loading must release")
     assert(forceCalls == 0, "late-within-tolerance fast loader must NOT be force-departed")
 
-    -- D) max✓ + 晚点超容差（delay 310s > 300）：到站+M（13:15:00）已过 → 强发兜底（不等下一趟）
-    --    到站+M = 13:12:00 + 180s = 13:15:00；跳到 13:15:10（47710 ≥ 47700）
+    -- D) max ticked + late beyond tolerance (delay 310s > 300): arrival+M (13:15:00) has passed -> forced departure as a safety net (don't wait for the next run)
+    --    arrival+M = 13:12:00 + 180s = 13:15:00; jump to 13:15:10 (47710 >= 47700)
     mockTime = 3600 * 13 + 910            -- 13:15:10
     resetWaiting()
     assert(tt.waitingRequired("V1") == false, "beyond tolerance + max elapsed must release (cap the dead wait)")
     assert(forceCalls == 1, "beyond-tolerance dead wait capped by max must forceDeparture (got " .. tostring(forceCalls) .. ")")
 
-    -- E) 对照：同样超容差场景但 max✗ → 扣到下一趟（max 是唯一让它提前走的开关）
+    -- E) Contrast: same beyond-tolerance scenario but max not ticked -> held until the next run (max is the only switch that lets it leave earlier)
     tt.setTimetableObject(objWith(false, false, false))
     mockTime = 3600 * 13 + 910
     resetWaiting()

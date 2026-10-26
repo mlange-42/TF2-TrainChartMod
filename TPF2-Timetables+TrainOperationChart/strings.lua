@@ -33,6 +33,30 @@ function data()
             ["diagram_hold_late_i18n"] = "Hold delayed trains",
             ["diagram_hold_late_tooltip_i18n"] = "If unchecked, trains later than the delay tolerance depart from this stop right away instead of waiting for the next slot. Early trains still wait for their departure time.",
             ["diagram_help_i18n"] = "Help",
+            ["diagram_help_text_i18n"] = [[
+[Line control switches]
+◇ Force departure ✓:
+   Departure is FORCED at the scheduled time, even if loading is not finished.
+   (Ticking it clears and disables Min./Max. wait)
+◇ Force departure ✗ — tick Min./Max. wait alone or together:
+■ Min. wait ticked:
+   The train must stay at the station at least the "min waiting time".
+   · Loading finished: before departure time → wait until it departs;
+      past departure time → leave once the min. time is met (still waits for
+      the next slot if the delay exceeds the tolerance).
+   · Loading not finished: keep loading, then apply the rules above.
+   Note: the game default min waiting time is 0 s — no real effect unless raised.
+■ Max. wait ticked:
+   Caps the dwell time (avoids waiting forever / endless loading).
+   · Before departure time: load freely; leave AT the departure time
+      (forced, even if loading is unfinished).
+   · Past departure time:
+      loading done & delay within tolerance → leave immediately;
+      loading done but beyond tolerance, or still loading → forced out no
+      later than "arrival + max waiting time".
+■ Min. + Max. both ticked:
+   Dwell time is clamped to the [min, max] interval (rules above combined).
+            ]],
             ["diagram_min_wait_i18n"] = "Min. wait",
             ["diagram_max_wait_i18n"] = "Max. wait",
             ["diagram_settings_auto_i18n"] = "Auto-refresh every 10s",
@@ -103,6 +127,7 @@ keep the constraints. The following constraints are available:
             ["diagram_data_sync_none_i18n"] = "No incompatible data found to sync.",
             ["diagram_data_sync_line_i18n"] = "Line %s: ",
             ["diagram_data_sync_station_i18n"] = "Station %d +%d entries",
+            ["diagram_data_sync_sep_i18n"] = ", ",
             ["mod_name_i18n"] = "Timetables & Train Diagram",
             ["mod_description_i18n"] = "This mod adds timetables and a train operation chart to the game",
         },
@@ -139,6 +164,30 @@ keep the constraints. The following constraints are available:
             ["diagram_hold_late_i18n"] = "Verspätete Züge zurückhalten",
             ["diagram_hold_late_tooltip_i18n"] = "Wenn deaktiviert, fahren Züge, die später als die Verspätungstoleranz sind, an diesem Halt sofort ab, statt auf den nächsten Slot zu warten. Zu frühe Züge warten weiterhin auf ihre Abfahrtszeit.",
             ["diagram_help_i18n"] = "Help",
+            ["diagram_help_text_i18n"] = [[
+[Line control switches]
+◇ Force departure ✓:
+   Departure is FORCED at the scheduled time, even if loading is not finished.
+   (Ticking it clears and disables Min./Max. wait)
+◇ Force departure ✗ — tick Min./Max. wait alone or together:
+■ Min. wait ticked:
+   The train must stay at the station at least the "min waiting time".
+   · Loading finished: before departure time → wait until it departs;
+      past departure time → leave once the min. time is met (still waits for
+      the next slot if the delay exceeds the tolerance).
+   · Loading not finished: keep loading, then apply the rules above.
+   Note: the game default min waiting time is 0 s — no real effect unless raised.
+■ Max. wait ticked:
+   Caps the dwell time (avoids waiting forever / endless loading).
+   · Before departure time: load freely; leave AT the departure time
+      (forced, even if loading is unfinished).
+   · Past departure time:
+      loading done & delay within tolerance → leave immediately;
+      loading done but beyond tolerance, or still loading → forced out no
+      later than "arrival + max waiting time".
+■ Min. + Max. both ticked:
+   Dwell time is clamped to the [min, max] interval (rules above combined).
+            ]],
             ["diagram_min_wait_i18n"] = "Min. wait",
             ["diagram_max_wait_i18n"] = "Max. wait",
             ["diagram_settings_auto_i18n"] = "Auto-Aktualisierung alle 10s",
@@ -209,6 +258,7 @@ Bedingungen einzuhalten. Folgende Bedingungen gibt es:
             ["diagram_data_sync_none_i18n"] = "Keine inkompatiblen Daten zum Synchronisieren gefunden.",
             ["diagram_data_sync_line_i18n"] = "Linie %s: ",
             ["diagram_data_sync_station_i18n"] = "Halt %d +%d Einträge",
+            ["diagram_data_sync_sep_i18n"] = ", ",
             ["mod_name_i18n"] = "Fahrpläne & Bildfahrplan",
             ["mod_description_i18n"] = "Fügt dem Spiel Fahrpläne und einen Bildfahrplan hinzu",
         },
@@ -245,6 +295,30 @@ Bedingungen einzuhalten. Folgende Bedingungen gibt es:
             ["diagram_hold_late_i18n"] = "Задерживать опаздывающие поезда",
             ["diagram_hold_late_tooltip_i18n"] = "Если выключено, поезда, опаздывающие больше допуска, сразу отправляются с этой остановки, а не ждут следующего слота. Прибывшие раньше поезда по-прежнему ждут времени отправления.",
             ["diagram_help_i18n"] = "Help",
+            ["diagram_help_text_i18n"] = [[
+[Line control switches]
+◇ Force departure ✓:
+   Departure is FORCED at the scheduled time, even if loading is not finished.
+   (Ticking it clears and disables Min./Max. wait)
+◇ Force departure ✗ — tick Min./Max. wait alone or together:
+■ Min. wait ticked:
+   The train must stay at the station at least the "min waiting time".
+   · Loading finished: before departure time → wait until it departs;
+      past departure time → leave once the min. time is met (still waits for
+      the next slot if the delay exceeds the tolerance).
+   · Loading not finished: keep loading, then apply the rules above.
+   Note: the game default min waiting time is 0 s — no real effect unless raised.
+■ Max. wait ticked:
+   Caps the dwell time (avoids waiting forever / endless loading).
+   · Before departure time: load freely; leave AT the departure time
+      (forced, even if loading is unfinished).
+   · Past departure time:
+      loading done & delay within tolerance → leave immediately;
+      loading done but beyond tolerance, or still loading → forced out no
+      later than "arrival + max waiting time".
+■ Min. + Max. both ticked:
+   Dwell time is clamped to the [min, max] interval (rules above combined).
+            ]],
             ["diagram_min_wait_i18n"] = "Min. wait",
             ["diagram_max_wait_i18n"] = "Max. wait",
             ["diagram_settings_auto_i18n"] = "Автообновление каждые 10 с",
@@ -307,6 +381,7 @@ Bedingungen einzuhalten. Folgende Bedingungen gibt es:
             ["diagram_data_sync_none_i18n"] = "Не найдено несовместимых данных для синхронизации.",
             ["diagram_data_sync_line_i18n"] = "Линия %s: ",
             ["diagram_data_sync_station_i18n"] = "Остановка %d +%d записей",
+            ["diagram_data_sync_sep_i18n"] = ", ",
             ["mod_name_i18n"] = "Расписание & График",
             ["mod_description_i18n"] = "Добавляет расписание и график движения поездов",
         },
@@ -343,6 +418,30 @@ Bedingungen einzuhalten. Folgende Bedingungen gibt es:
             ["diagram_hold_late_i18n"] = "Trattieni i treni in ritardo",
             ["diagram_hold_late_tooltip_i18n"] = "Se disattivato, i treni in ritardo oltre la tolleranza partono subito da questa fermata invece di attendere lo slot successivo. I treni in anticipo attendono comunque l'orario di partenza.",
             ["diagram_help_i18n"] = "Help",
+            ["diagram_help_text_i18n"] = [[
+[Line control switches]
+◇ Force departure ✓:
+   Departure is FORCED at the scheduled time, even if loading is not finished.
+   (Ticking it clears and disables Min./Max. wait)
+◇ Force departure ✗ — tick Min./Max. wait alone or together:
+■ Min. wait ticked:
+   The train must stay at the station at least the "min waiting time".
+   · Loading finished: before departure time → wait until it departs;
+      past departure time → leave once the min. time is met (still waits for
+      the next slot if the delay exceeds the tolerance).
+   · Loading not finished: keep loading, then apply the rules above.
+   Note: the game default min waiting time is 0 s — no real effect unless raised.
+■ Max. wait ticked:
+   Caps the dwell time (avoids waiting forever / endless loading).
+   · Before departure time: load freely; leave AT the departure time
+      (forced, even if loading is unfinished).
+   · Past departure time:
+      loading done & delay within tolerance → leave immediately;
+      loading done but beyond tolerance, or still loading → forced out no
+      later than "arrival + max waiting time".
+■ Min. + Max. both ticked:
+   Dwell time is clamped to the [min, max] interval (rules above combined).
+            ]],
             ["diagram_min_wait_i18n"] = "Min. wait",
             ["diagram_max_wait_i18n"] = "Max. wait",
             ["diagram_settings_auto_i18n"] = "Aggiornamento automatico ogni 10s",
@@ -405,6 +504,7 @@ a mantenere l'orario impostato.
             ["diagram_data_sync_none_i18n"] = "Nessun dato incompatibile da sincronizzare.",
             ["diagram_data_sync_line_i18n"] = "Linea %s: ",
             ["diagram_data_sync_station_i18n"] = "Fermata %d +%d voci",
+            ["diagram_data_sync_sep_i18n"] = ", ",
             ["mod_name_i18n"] = "Orari & Diagramma",
             ["mod_description_i18n"] = "Aggiunge orari e un diagramma dei treni al gioco",
         },
@@ -494,6 +594,30 @@ a mantenere l'orario impostato.
             ["diagram_hold_late_i18n"] = "Retenir les trains en retard",
             ["diagram_hold_late_tooltip_i18n"] = "Si décoché, les trains dont le retard dépasse la tolérance partent immédiatement de cet arrêt au lieu d'attendre le créneau suivant. Les trains en avance attendent toujours leur heure de départ.",
             ["diagram_help_i18n"] = "Help",
+            ["diagram_help_text_i18n"] = [[
+[Line control switches]
+◇ Force departure ✓:
+   Departure is FORCED at the scheduled time, even if loading is not finished.
+   (Ticking it clears and disables Min./Max. wait)
+◇ Force departure ✗ — tick Min./Max. wait alone or together:
+■ Min. wait ticked:
+   The train must stay at the station at least the "min waiting time".
+   · Loading finished: before departure time → wait until it departs;
+      past departure time → leave once the min. time is met (still waits for
+      the next slot if the delay exceeds the tolerance).
+   · Loading not finished: keep loading, then apply the rules above.
+   Note: the game default min waiting time is 0 s — no real effect unless raised.
+■ Max. wait ticked:
+   Caps the dwell time (avoids waiting forever / endless loading).
+   · Before departure time: load freely; leave AT the departure time
+      (forced, even if loading is unfinished).
+   · Past departure time:
+      loading done & delay within tolerance → leave immediately;
+      loading done but beyond tolerance, or still loading → forced out no
+      later than "arrival + max waiting time".
+■ Min. + Max. both ticked:
+   Dwell time is clamped to the [min, max] interval (rules above combined).
+            ]],
             ["diagram_min_wait_i18n"] = "Min. wait",
             ["diagram_max_wait_i18n"] = "Max. wait",
             ["diagram_settings_auto_i18n"] = "Rafraîchissement auto toutes les 10s",
@@ -555,6 +679,7 @@ a mantenere l'orario impostato.
         ["diagram_data_sync_none_i18n"] = "Aucune donnée incompatible à synchroniser.",
         ["diagram_data_sync_line_i18n"] = "Ligne %s : ",
         ["diagram_data_sync_station_i18n"] = "Gare %d +%d entrées",
+        ["diagram_data_sync_sep_i18n"] = ", ",
         ["mod_name_i18n"] = "Horaires & Graphique",
         ["mod_description_i18n"] = "Ajoute des horaires et un graphique de trains au jeu",
     },
@@ -644,6 +769,27 @@ a mantenere l'orario impostato.
             ["diagram_hold_late_i18n"] = "扣留晚点列车",
             ["diagram_hold_late_tooltip_i18n"] = "取消勾选后，晚点超过判定标准的列车在本站立即发车，不再扣到下一趟。早到的列车仍等到发车时刻。",
             ["diagram_help_i18n"] = "说明",
+            ["diagram_help_text_i18n"] = [[
+【线路控车 说明】
+◇ 到点发车 ✓：
+   到点强制发车，无论装卸是否完成。
+   （勾选后 最小/最大停站时间 会自动清空、不可再勾）
+◇ 到点发车 ✗：可单独或组合勾选 最小/最大停站时间。
+■ 勾 最小停站时间：
+   列车在站内至少停满“最小停站时间”。
+   · 装卸完成：发车时刻未到 → 等到点再发车；
+      已过发车时刻 → 停满最小时间后发车（晚点超容差仍扣到下一趟）。
+   · 装卸未完成：继续装卸，装完后再按上条判定。
+   ※ 游戏默认最小停站时间 = 0 秒，不调大则此勾选无实际效果。
+■ 勾 最大停站时间：
+   给停站时长设上限，防止“死等下一趟 / 装卸拖沓”。
+   · 发车时刻未到：自由装卸，等到点，到点发车（装没装完都发）。
+   · 已过发车时刻：
+      装完且晚点在容差内 → 立刻发车；
+      装完但晚点超容差 / 一直没装完 → 最迟停到“到站+最大停站时间”强制发车。
+■ 最小+最大 同时勾：
+   停站时长限制在 [最小, 最大] 区间内（上面两条合并）。
+            ]],
             ["diagram_min_wait_i18n"] = "最小停站时间",
             ["diagram_max_wait_i18n"] = "最大停站时间",
             ["diagram_settings_auto_i18n"] = "10秒自动刷新",
@@ -712,6 +858,7 @@ a mantenere l'orario impostato.
             ["diagram_data_sync_none_i18n"] = "未发现需要同步的旧版数据",
             ["diagram_data_sync_line_i18n"] = "线路 %s：",
             ["diagram_data_sync_station_i18n"] = "站 %d 增加 %d 个时刻信息",
+            ["diagram_data_sync_sep_i18n"] = "、",
             ["mod_name_i18n"] = "时刻表&运行图",
             ["mod_description_i18n"] = "本模组为游戏添加时刻表系统和列车运行图",
         },
@@ -748,6 +895,27 @@ a mantenere l'orario impostato.
             ["diagram_hold_late_i18n"] = "扣留晚點列車",
             ["diagram_hold_late_tooltip_i18n"] = "取消勾選後，晚點超過判定標準的列車在本站立即發車，不再扣到下一趟。早到的列車仍等到發車時刻。",
             ["diagram_help_i18n"] = "說明",
+            ["diagram_help_text_i18n"] = [[
+【線路控車 說明】
+◇ 到點發車 ✓：
+   到點強制發車，無論裝卸是否完成。
+   （勾選後 最小/最大停站時間 會自動清空、不可再勾）
+◇ 到點發車 ✗：可單獨或組合勾選 最小/最大停站時間。
+■ 勾 最小停站時間：
+   列車在站內至少停滿「最小停站時間」。
+   · 裝卸完成：發車時刻未到 → 等到點再發車；
+      已過發車時刻 → 停滿最小時間後發車（晚點超容差仍扣到下一趟）。
+   · 裝卸未完成：繼續裝卸，裝完後再按上條判定。
+   ※ 遊戲預設最小停站時間 = 0 秒，不調大則此勾選無實際效果。
+■ 勾 最大停站時間：
+   給停站時長設上限，防止「死等下一趟 / 裝卸拖沓」。
+   · 發車時刻未到：自由裝卸，等到點，到點發車（裝沒裝完都發）。
+   · 已過發車時刻：
+      裝完且晚點在容差內 → 立刻發車；
+      裝完但晚點超容差 / 一直沒裝完 → 最遲停到「到站+最大停站時間」強制發車。
+■ 最小+最大 同時勾：
+   停站時長限制在 [最小, 最大] 區間內（上面兩條合併）。
+            ]],
             ["diagram_min_wait_i18n"] = "最小停站時間",
             ["diagram_max_wait_i18n"] = "最大停站時間",
             ["diagram_settings_auto_i18n"] = "10秒自動刷新",
@@ -816,6 +984,7 @@ a mantenere l'orario impostato.
             ["diagram_data_sync_none_i18n"] = "未發現需要同步的舊版資料",
             ["diagram_data_sync_line_i18n"] = "路線 %s：",
             ["diagram_data_sync_station_i18n"] = "站 %d 增加 %d 個時刻資訊",
+            ["diagram_data_sync_sep_i18n"] = "、",
             ["mod_name_i18n"] = "時刻表&運行圖",
             ["mod_description_i18n"] = "本模組爲遊戲添加時刻表系統和列車運行圖",
         },
