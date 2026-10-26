@@ -554,6 +554,52 @@ local function normalizeStopData(stopData)
     if type(stopData.outboundTime) ~= "table" then stopData.outboundTime = {} end
 end
 
+-- Matches a reference time (usually the vehicle's arrival) to the slot whose [arr, dep]
+-- interval is closest to it (distance 0 if inside). Before the departure the train counts
+-- as early/on time, after it as late. Ties prefer the later slot (wait rather than leave early).
+---@param constraints table in format like: {{30,0,59,0},{9,0,59,0},...}
+---@param ref number absolute time in seconds
+---@return number|nil absArr absolute arrival time of the matched slot
+---@return number|nil absDep absolute departure time of the matched slot
+function timetable.assignSlot(constraints, ref)
+    local bestArr, bestDep, bestDist = nil, nil, math.huge
+    local base = math.floor(ref / 3600)
+    for _, c in ipairs(constraints) do
+        local arrTime = (c[1] * 60 + c[2]) % 3600
+        local depTime = (c[3] * 60 + c[4]) % 3600
+        local dwell = (depTime - arrTime) % 3600
+        for k = base - 1, base + 1 do
+            local absArr = arrTime + 3600 * k
+            local absDep = absArr + dwell
+            local dist = 0
+            if ref < absArr then
+                dist = absArr - ref
+            elseif ref > absDep then
+                dist = ref - absDep
+            end
+            if dist < bestDist or (dist == bestDist and absDep > bestDep) then
+                bestArr, bestDep, bestDist = absArr, absDep, dist
+            end
+        end
+    end
+    return bestArr, bestDep
+end
+
+-- First departure of any slot strictly after the given time.
+---@param constraints table in format like: {{30,0,59,0},{9,0,59,0},...}
+---@param time number absolute time in seconds
+---@return number|nil absDep
+function timetable.getNextDeparture(constraints, time)
+    local best = nil
+    for _, c in ipairs(constraints) do
+        local depTime = (c[3] * 60 + c[4]) % 3600
+        local absDep = depTime + 3600 * math.floor(time / 3600)
+        if absDep <= time then absDep = absDep + 3600 end
+        if not best or absDep < best then best = absDep end
+    end
+    return best
+end
+
 function timetable.waitingRequired(vehicle)
     -- 车辆可能已删除（玩家卖车后，协程遍历的 AT_TERMINAL 快照可能含失效 ID）：
     -- getCurrentLine/getCurrentStation/getTimeUntilDeparture 内 getComponent 对失效实体触发
@@ -628,9 +674,10 @@ function timetable.waitingRequired(vehicle)
         local maxEn = (not forceDep) and timetable.getMaxWaitEnabled(currentLine)
         -- min/max 的数值 = 引擎 Line.Stop 原生驻留上下限（api.type Line.Stop.minWaitingTime/maxWaitingTime）；
         -- 车辆到站时刻 = TRANSPORT_VEHICLE.doorsTime（微秒→秒，3625975189 同款取值）。
+        -- The arrival time is always read: it is the reference for matching the train to a slot.
         local dwellMin, dwellMax, arrivalSec = nil, nil, nil
-        if minEn or maxEn then
-            pcall(function()
+        pcall(function()
+            if minEn or maxEn then
                 local okEv2, exists2 = pcall(function() return api.engine.entityExists(currentLine) end)
                 if okEv2 and exists2 == true then
                     local okLS2, lineObj2 = pcall(function()
@@ -642,53 +689,79 @@ function timetable.waitingRequired(vehicle)
                         dwellMax = stInfo.maxWaitingTime
                     end
                 end
-                local okEv3, exists3 = pcall(function() return api.engine.entityExists(tonumber(vehicle)) end)
-                if okEv3 and exists3 == true then
-                    local okVC, vc2 = pcall(function()
-                        return api.engine.getComponent(tonumber(vehicle), api.type.ComponentType.TRANSPORT_VEHICLE)
-                    end)
-                    if okVC and vc2 and vc2.doorsTime then
-                        arrivalSec = math.floor(vc2.doorsTime / 1000000)
-                    end
+            end
+            local okEv3, exists3 = pcall(function() return api.engine.entityExists(tonumber(vehicle)) end)
+            if okEv3 and exists3 == true then
+                local okVC, vc2 = pcall(function()
+                    return api.engine.getComponent(tonumber(vehicle), api.type.ComponentType.TRANSPORT_VEHICLE)
+                end)
+                if okVC and vc2 and vc2.doorsTime then
+                    arrivalSec = math.floor(vc2.doorsTime / 1000000)
                 end
-            end)
-        end
+            end
+        end)
         -- 释放动作统一出口：到点发车=true → 强发；false → 仅普通放行（引擎装完关门才走，不掐装卸）。
         local function releaseNow(forceIt)
             stopData.currentlyWaiting[vehicle] = nil
             stopData.outboundTime[vehicle] = time
             if forceIt then timetableHelper.forceDeparture(vehicle) end
         end
-        local function holdNow()
-            stopData.currentlyWaiting[vehicle] = { type = "ArrDep", arrivalTime = time }
+        -- Holds the train until the given departure. The target is stored so that the decision
+        -- stays fixed while the train waits (it is not re-matched on every tick).
+        local function holdNow(dep, late)
+            local prev = stopData.currentlyWaiting[vehicle]
+            stopData.currentlyWaiting[vehicle] = {
+                type = "ArrDep",
+                arrivalTime = (prev and prev.arrivalTime) or time,
+                dep = dep,
+                late = late,
+            }
         end
 
-        -- 逐槽位计算：周期取"到达时刻离当前时刻最近"的那一趟（早到时取下一趟，
-        -- 避免把早到误判成对上一趟晚点）。统计：
-        --   nextDep       = 下一趟发车时刻（绝对秒，未错过槽位的发车）
-        --   smallestDelay = 距最近一趟"已错过"发车的晚点秒数
-        --   missDep       = 产生 smallestDelay 那趟（已错过）的绝对发车时刻
-        local nextDep = nil
-        local smallestDelay = nil
-        local missDep = nil
-        for _, c in ipairs(constraints) do
-            local arrTime = (c[1] * 60 + c[2]) % 3600
-            local depTime = (c[3] * 60 + c[4]) % 3600
-            local k = math.floor((time - arrTime + 1800) / 3600)
-            local absArr = arrTime + 3600 * k
-            local absDep = depTime + 3600 * k
-            if absDep < absArr then absDep = absDep + 3600 end
-            if time < absDep then
-                -- 未到该槽位发车（早到/正点）→ 作为等待候选
-                if not nextDep or absDep < nextDep then nextDep = absDep end
-            else
-                -- 已过该槽位发车（晚点）→ 记录晚点秒数
-                local delay = time - absDep
-                if not smallestDelay or delay < smallestDelay then
-                    smallestDelay = delay
-                    missDep = absDep
+        -- missDep    = the departure that has been reached or missed (absolute seconds)
+        -- checkDelay = whether the delay tolerance still applies (not for a stored target)
+        -- isLate     = the train was held after missing its slot (for the max dwell cap)
+        local entry = stopData.currentlyWaiting[vehicle]
+        if entry and arrivalSec and entry.arrivalTime and arrivalSec > entry.arrivalTime then
+            -- Left over from an earlier visit (train left without being released here).
+            entry = nil
+        end
+        local missDep, checkDelay, isLate
+        if entry and entry.dep then
+            -- Already held: wait for the stored departure.
+            isLate = entry.late == true
+            if time < entry.dep then
+                if isLate and not forceDep and maxEn and arrivalSec and dwellMax
+                   and time >= arrivalSec + dwellMax then
+                    releaseNow(true)
+                    return false
                 end
+                return true
             end
+            missDep = entry.dep
+            checkDelay = false
+        else
+            -- Match the arrival to the closest slot. Falls back to the current time if the
+            -- arrival time is unavailable or implausible.
+            local ref = time
+            if arrivalSec and arrivalSec <= time and time - arrivalSec < 3600 then
+                ref = arrivalSec
+            elseif entry and entry.arrivalTime then
+                ref = entry.arrivalTime
+            end
+            local _, slotDep = timetable.assignSlot(constraints, ref)
+            if not slotDep then
+                releaseNow(false)
+                return false
+            end
+            if time < slotDep then
+                -- Early or on time: wait for the departure (with max dwell, released by ② at the point).
+                holdNow(slotDep, false)
+                return true
+            end
+            missDep = slotDep
+            checkDelay = true
+            isLate = true
         end
 
         -- ===== 最大停站时间（maxEn，仅到点发车关闭时）——用户定稿 2026-08-16 =====
@@ -697,44 +770,34 @@ function timetable.waitingRequired(vehicle)
         --   ② 车是"发车点前到达、被扣着等到点"的，点到即走 → 强发（不等装卸完，掐装卸）；
         --   发车时刻没到 → 绝不提前强发（早到照常等到点，保准点不早发）。
         --   晚点但装得快（发车时刻已过、容差内）→ 普通放行"装完就走"，max 不在此兜底（玩家拍板）。
-        if smallestDelay then
-            -- 该趟发车时刻已过（晚点）
-            if not forceDep and maxEn and arrivalSec and dwellMax
-               and time >= arrivalSec + dwellMax then
-                -- ① 到站已满 M 秒仍滞留：无论超不超容差、装没装完，强发兜底（防死等/防无限装卸）
-                releaseNow(true)
-                return false
-            end
-            if tolerance > 0 and smallestDelay > tolerance then
-                -- 晚点超过判定标准：扣车到下一趟/下一周期（勾了 max 则到"到站+M"被 ① 强发）
-                holdNow()
-                return true
-            end
-            -- 未设判定标准（无）或晚点在容差内：
-            -- 到点发车关闭 + 最小停站时间未满 → 继续扣到 arrival+minWaitingTime 再放行
-            if not forceDep and minEn and arrivalSec and dwellMin and time < arrivalSec + dwellMin then
-                holdNow()
-                return true
-            end
-            -- ② 到点强发：车到站早于该趟发车点（是"等点到"的车，不是"晚点到"的车）→ 勾了 max 强发；
-            --    晚点到达、装完即走的车 → 走下面的普通放行（max 不兜此情形）
-            if not forceDep and maxEn and arrivalSec and missDep and arrivalSec < missDep then
-                releaseNow(true)
-                return false
-            end
-            -- 到点发车（默认）→ 强发（必须无条件 forceDeparture：车首次到站从未被扣时
-            -- 只 startVehicle 不会立即发车，会停在站里——AGENTS.md 2026-08-04 教训）；
-            -- 到点发车关闭 → 普通放行（引擎装完关门才走，不掐装卸）。
-            releaseNow(forceDep)
+        if not forceDep and maxEn and arrivalSec and dwellMax
+           and time >= arrivalSec + dwellMax then
+            -- ① 到站已满 M 秒仍滞留：无论超不超容差、装没装完，强发兜底（防死等/防无限装卸）
+            releaseNow(true)
             return false
         end
-
-        -- 未错过任何槽位（早到/正点）：等待下一趟发车（勾了 max 也扣着等到点，到点后走 ② 强发）
-        if nextDep then
-            holdNow()
+        if checkDelay and tolerance > 0 and time - missDep > tolerance
+           and timetable.getHoldLateEnabled(currentLine, currentStop) then
+            -- 晚点超过判定标准：扣车到下一趟/下一周期（勾了 max 则到"到站+M"被 ① 强发）
+            holdNow(timetable.getNextDeparture(constraints, time), true)
             return true
         end
-        releaseNow(false)
+        -- 未设判定标准（无）或晚点在容差内：
+        -- 到点发车关闭 + 最小停站时间未满 → 继续扣到 arrival+minWaitingTime 再放行
+        if not forceDep and minEn and arrivalSec and dwellMin and time < arrivalSec + dwellMin then
+            holdNow(missDep, isLate)
+            return true
+        end
+        -- ② 到点强发：车到站早于该趟发车点（是"等点到"的车，不是"晚点到"的车）→ 勾了 max 强发；
+        --    晚点到达、装完即走的车 → 走下面的普通放行（max 不兜此情形）
+        if not forceDep and maxEn and arrivalSec and arrivalSec < missDep then
+            releaseNow(true)
+            return false
+        end
+        -- 到点发车（默认）→ 强发（必须无条件 forceDeparture：车首次到站从未被扣时
+        -- 只 startVehicle 不会立即发车，会停在站里——AGENTS.md 2026-08-04 教训）；
+        -- 到点发车关闭 → 普通放行（引擎装完关门才走，不掐装卸）。
+        releaseNow(forceDep)
         return false
 
 
@@ -1099,6 +1162,25 @@ end
 function timetable.setForceDepartureEnabled(line, value)
     if timetableObject[tostring(line)] then
         timetableObject[tostring(line)].forceDeparture = value == true
+    end
+end
+
+-- Per-stop holding point: whether trains later than the delay tolerance are held at this stop
+-- until the next slot. Default true (old behaviour). When false, late trains depart right away;
+-- early trains still wait for their departure. Stored on the station entry, so it moves along
+-- with it in reconcileStationData.
+function timetable.getHoldLateEnabled(line, stationNumber)
+    local entry = timetableObject[tostring(line)]
+    local st = entry and entry.stations and entry.stations[stationNumber]
+    if not st or st.holdLate == nil then return true end
+    return st.holdLate == true
+end
+
+function timetable.setHoldLateEnabled(line, stationNumber, value)
+    local entry = timetableObject[tostring(line)]
+    local st = entry and entry.stations and entry.stations[stationNumber]
+    if st then
+        st.holdLate = value == true
     end
 end
 
