@@ -433,6 +433,15 @@ function timetable.removeWaypointPassingTime(line, wpEntity, index)
     return -1
 end
 
+function timetable.removeAllWaypointPassingTimes(line, wpEntity)
+    if not (line and wpEntity) then return -1 end
+    local lineData = timetableObject[tostring(line)]
+    if lineData and lineData.waypointTimes then
+        lineData.waypointTimes[tostring(wpEntity)] = nil
+    end
+    return 0
+end
+
 function timetable.updateWaypointPassingTimeEntry(line, wpEntity, index, subIndex, value)
     if line == nil or wpEntity == nil or index == nil or subIndex == nil or value == nil then return -1 end
     local key = tostring(wpEntity)

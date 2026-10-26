@@ -461,6 +461,27 @@ function timetableHelper.getEntityPosition(entity)
     return x, y
 end
 
+-- Midpoint of a track/street edge, from its two nodes.
+local function edgeMidpoint(edge)
+    local be = api.engine.getComponent(edge, api.type.ComponentType.BASE_EDGE)
+    local n0 = api.engine.getComponent(be.node0, api.type.ComponentType.BASE_NODE)
+    local n1 = api.engine.getComponent(be.node1, api.type.ComponentType.BASE_NODE)
+    return (n0.position.x + n1.position.x) / 2, (n0.position.y + n1.position.y) / 2
+end
+
+---World position of a line waypoint (signal or waypoint, a SignalId {entity, index}):
+---the midpoint of the track edge it is placed on (verified in-game).
+---@param wpRef userdata SignalId from Line.Stop.waypoints
+---@return number|nil x
+---@return number|nil y
+function timetableHelper.getWaypointPosition(wpRef)
+    local ok, x, y = pcall(function()
+        return edgeMidpoint(api.engine.system.streetSystem.getEdgeForEdgeObject(wpRef.entity))
+    end)
+    if ok and type(x) == "number" and type(y) == "number" then return x, y end
+    return nil
+end
+
 ---@param line number | string
 -- returns [seconds] travel time estimate of the leg leaving each stop, indexed by stop index,
 -- and [distance] straight-line distance of each leg (leg i: stop i -> stop i+1, last -> first).
@@ -917,6 +938,8 @@ function timetableHelper.getAllStops(line)
                         parentStationGroup = sgEntity,
                         gwKey = gwKey,
                     }
+                    local px, py = timetableHelper.getWaypointPosition(wpRef)
+                    if px then res[flatIdx].pos = { px, py } end
                 end
             end
         end

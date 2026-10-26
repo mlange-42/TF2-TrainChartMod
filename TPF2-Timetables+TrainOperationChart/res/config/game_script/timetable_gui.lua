@@ -1276,6 +1276,38 @@ function timetableGUI.fillConstraintTable(index, lineID)
 end
 
 
+local SEPARATION_LIST = {30, 20, 15, 12, 10, 7.5, 6, 5, 4, 3, 2.5, 2, 1.5, 1.2, 1}
+
+-- Adds the "Separation [interval] Generate" row to the constraint window.
+---@param generate function(sep) writes the generated times (sep in minutes, divides 60);
+---  returns false if there is nothing to generate from
+function timetableGUI.addSeparationRow(lineID, generate)
+    local separationCombo = api.gui.comp.ComboBox.new()
+    for _, sep in ipairs(SEPARATION_LIST) do
+        separationCombo:addItem(string.format("%g min (%g/h)", sep, 60 / sep))
+    end
+    separationCombo:setGravity(1, 0)
+    local generateButton = api.gui.comp.Button.new(api.gui.comp.TextView.new(UIStrings.generate), true)
+    generateButton:setGravity(1, 0)
+    generateButton:onClick(function()
+        local sepIdx = separationCombo:getCurrentIndex()
+        if sepIdx == nil or sepIdx < 0 then
+            print("[Timetable] Generate: select a separation first")
+            return
+        end
+        if not generate(SEPARATION_LIST[sepIdx + 1]) then return end
+        timetableChanged = true
+        clearConstraintWindowLaterHACK = function()
+            timetableGUI.initStationTable()
+            timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+            timetableGUI.rebuildConstraintWindow(lineID)
+        end
+    end)
+    local sepRow = api.gui.comp.Table.new(3, 'NONE')
+    sepRow:addRow({api.gui.comp.TextView.new(UIStrings.separation), separationCombo, generateButton})
+    menu.constraintTable:addRow({sepRow})
+end
+
 function timetableGUI.makeArrDepWindow(lineID, stationID)
     if not menu.constraintTable then return end
     local conditions = timetable.getConditions(lineID,stationID, "ArrDep")
@@ -1294,30 +1326,15 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
         end
     end)
 
-    -- 自动时刻间隔生成行（2026-08-16 功能，位置在"约束下拉+刷新"行之下、"添加"行之上）：
-    -- Separation 下拉（间隔分钟，都整除 60）+ 生成按钮。以第一条模板时刻为基准，把整小时补齐等间隔时刻。
-    local SEPARATION_LIST = {30, 20, 15, 12, 10, 7.5, 6, 5, 4, 3, 2.5, 2, 1.5, 1.2, 1}
-    local separationCombo = api.gui.comp.ComboBox.new()
-    for _, sep in ipairs(SEPARATION_LIST) do
-        separationCombo:addItem(string.format("%g min (%g/h)", sep, 60 / sep))
-    end
-    separationCombo:setGravity(1, 0)
-    local generateButton = api.gui.comp.Button.new(api.gui.comp.TextView.new(UIStrings.generate), true)
-    generateButton:setGravity(1, 0)
-    generateButton:onClick(function()
+    -- Separation row: fill the hour with evenly spaced copies of the first slot.
+    timetableGUI.addSeparationRow(lineID, function(sep)
         local conds = timetable.getConditions(lineID, stationID, "ArrDep")
         if type(conds) ~= "table" or #conds < 1 then
-            print("[Timetable] Generate: 需要先添加一条模板时刻（Arr/Dep）")
-            return
+            print("[Timetable] Generate: add one arrival/departure time as a template first")
+            return false
         end
-        local sepIdx = separationCombo:getCurrentIndex()
-        if sepIdx == nil or sepIdx < 0 then
-            print("[Timetable] Generate: 需要先选择间隔（Separation）")
-            return
-        end
-        local sep = SEPARATION_LIST[sepIdx + 1]
         local template = conds[1]
-        -- 已有 >1 条：保留第一条作模板、清空其余再重新生成（防连点叠加）
+        -- More than one slot: keep the first as the template and replace the others
         if #conds > 1 then
             timetable.removeAllConditions(lineID, stationID, "ArrDep")
             timetable.addCondition(lineID, stationID, {type = "ArrDep", ArrDep = {template}})
@@ -1325,16 +1342,8 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
         for i = 1, 60 / sep - 1 do
             timetable.addCondition(lineID, stationID, {type = "ArrDep", ArrDep = {timetable.shiftSlot(template, i * sep * 60)}})
         end
-        timetableChanged = true
-        clearConstraintWindowLaterHACK = function()
-            timetableGUI.initStationTable()
-            timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
-            timetableGUI.rebuildConstraintWindow(lineID)
-        end
+        return true
     end)
-    local sepRow = api.gui.comp.Table.new(3, 'NONE')
-    sepRow:addRow({api.gui.comp.TextView.new(UIStrings.separation), separationCombo, generateButton})
-    menu.constraintTable:addRow({sepRow})
 
     -- Holding point: whether trains beyond the delay tolerance are held here until the next slot.
     -- Same checkbox pattern as the line control switches (Button with swapped image).
@@ -1571,6 +1580,23 @@ function timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
 
     -- 通过时间编辑(多组，支持添加删除)
     local times = timetable.getWaypointPassingTime(lineID, wpEntity)
+
+    -- Separation row: fill the hour with evenly spaced copies of the first passing time.
+    timetableGUI.addSeparationRow(lineID, function(sep)
+        local cur = timetable.getWaypointPassingTime(lineID, wpEntity)
+        if not cur or #cur < 1 then
+            print("[Timetable] Generate: add one passing time as a template first")
+            return false
+        end
+        local template = { cur[1][1] or 0, cur[1][2] or 0 }
+        timetable.removeAllWaypointPassingTimes(lineID, wpEntity)
+        timetable.addWaypointPassingTime(lineID, wpEntity, template[1], template[2])
+        for i = 1, 60 / sep - 1 do
+            local t = timetable.shiftTime(template, i * sep * 60)
+            timetable.addWaypointPassingTime(lineID, wpEntity, t[1], t[2])
+        end
+        return true
+    end)
 
     -- header + 添加按钮
     local addButton = api.gui.comp.Button.new(api.gui.comp.TextView.new("+"), true)

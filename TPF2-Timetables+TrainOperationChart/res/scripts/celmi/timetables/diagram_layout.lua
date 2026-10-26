@@ -8,7 +8,9 @@ local diagramLayout = {}
 ---cumulative leg metric (distance or travel time). Whenever the line moves between two
 ---adjacent rows, the metric difference is a sample for that gap. Samples of all lines and
 ---both directions are averaged. Legs without a metric break the measurement.
----@param lines table {{stations = flat stop list {stopIndex, isLineStop, uniqueKey}, metric = [stopIndex] = leg value}, ...}
+---Waypoints lie on the leg at their legFrac (see diagramTrains.assignLegFractions), or equally
+---spaced if they have none.
+---@param lines table {{stations = flat stop list {stopIndex, isLineStop, uniqueKey, legFrac}, metric = [stopIndex] = leg value}, ...}
 ---@param rowOf table [uniqueKey] = row index
 ---@param nRows number
 ---@return table [gap index] = mean metric, or nil where no line runs between the rows
@@ -52,7 +54,7 @@ function diagramLayout.lineGaps(lines, rowOf, nRows)
             elseif legIdx then
                 wpNo = wpNo + 1
                 local m = metric[legIdx]
-                if m then record(f, legStart + m * wpNo / (legWps + 1), seg) end
+                if m then record(f, legStart + m * (st.legFrac or wpNo / (legWps + 1)), seg) end
             end
         end
         -- leg back to the first stop

@@ -353,6 +353,17 @@ local function sortAllStations()
     end)
 end
 
+-- Station positions (station group entity -> {x, y}), cached: they hardly ever change
+local stationPosCache = {}
+local function getStationPos(id)
+    local key = tostring(id)
+    if stationPosCache[key] == nil then
+        local x, y = timetableHelper.getEntityPosition(tonumber(id))
+        stationPosCache[key] = x and {x, y} or false
+    end
+    return stationPosCache[key] or nil
+end
+
 local function getAllTimetableData()
     local data = {}
     for _, lineInfo in pairs(timetableHelper.getAllRailLines()) do
@@ -414,8 +425,14 @@ local function getAllTimetableData()
                     end
                 end
             end
+            if stopInfo.type == "station" then
+                entry.pos = getStationPos(stopInfo.id)
+            else
+                entry.pos = stopInfo.pos
+            end
             lineData.stations[flatIdx] = entry
         end
+        diagramTrains.assignLegFractions(lineData.stations)
         table.insert(data, lineData)
         ::continueLine::
     end
@@ -446,7 +463,7 @@ local function getAllStationsFlat(lineDataList)
                 table.insert(list, {
                     id = st.id, entityId = st.entityId, uniqueKey = st.uniqueKey, name = dn,
                     selected = false, sort = 256, stopType = st.stopType,
-                    sourceLineID = ld.id, sourceLineName = ld.name,
+                    sourceLineID = ld.id, sourceLineName = ld.name, pos = st.pos,
                 })
             end
         end
@@ -572,17 +589,6 @@ local function createColorChooserButton(lineData, onSelected)
     return btn
 end
 
--- 车站位置缓存（站组实体 → {x, y}），车站位置基本不变，避免每次刷新都查询
-local stationPosCache = {}
-local function getStationPos(id)
-    local key = tostring(id)
-    if stationPosCache[key] == nil then
-        local x, y = timetableHelper.getEntityPosition(tonumber(id))
-        stationPosCache[key] = x and {x, y} or false
-    end
-    return stationPosCache[key] or nil
-end
-
 -- 按设置计算各行（排序组）的纵坐标：
 --   equal    等距
 --   distance 沿线路的站间直线距离（各线路、双向取平均），无线路经过的相邻行用两行车站的直线距离补
@@ -596,11 +602,14 @@ local function computeRowYs(keyRow, sorts, labelGroups, h)
     local direct = {}
     local prevPos = nil
     for i, sv in ipairs(sorts) do
+        -- a station of the row, else a waypoint
         local pos = nil
         for _, s in pairs(labelGroups[sv]) do
             if s.stopType == "station" then
                 pos = getStationPos(s.id)
                 if pos then break end
+            elseif not pos then
+                pos = s.pos
             end
         end
         if pos and prevPos then
