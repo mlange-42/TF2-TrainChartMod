@@ -1,5 +1,6 @@
 local timetable = require "celmi/timetables/timetable"
 local timetableHelper = require "celmi/timetables/timetable_helper"
+local diagramTrains = require "celmi/timetables/diagram_trains"
 -- 交路系统已独立为 TrainRoute mod：这里通过 _G._trainRouteDiagramHook 读取它的
 -- getDiagramMode()/isConfigLine() 来决定"交路运行图模式"绘制；未安装 TrainRoute 时钩子为 nil，
 -- 运行图按普通模式绘制（与无交路系统时一致）。
@@ -378,7 +379,9 @@ local function getAllTimetableData()
             id = lineID, name = lineInfo.name, stations = {},
             color = savedColor or getColor(#data + 1),
             selected = false, bold = false, checked = true,
-        }        for flatIdx, stopInfo in ipairs(stops) do
+            legTimes = timetableHelper.getLegTimeEstimates(lineID),
+        }
+        for flatIdx, stopInfo in ipairs(stops) do
             local displayName = stopInfo.name
             local gk = stopInfo.gwKey
             if stopInfo.type == "waypoint" then
@@ -394,7 +397,8 @@ local function getAllTimetableData()
             local uk = tostring(stopInfo.id) .. "_" .. tostring(lineID)
             local entry = { id = stopInfo.id, entityId = stopInfo.entityId, uniqueKey = uk,
                 name = displayName, stopType = stopInfo.type, times = {},
-                gwKey = gk }
+                gwKey = gk, stopIndex = stopInfo.stopIndex,
+                isLineStop = stopInfo.type == "station" or stopInfo.parentStationGroup == nil }
             if stopInfo.type == "station" then
                 local ct = timetable.getConditionType(lineID, stopInfo.stopIndex)
                 if ct == "ArrDep" then
@@ -973,97 +977,34 @@ local function refreshDiagram()
         if lv then
             lv:setColor(ld.color)
             local lw = ld.bold and 4 or 2
-            local maxG = 0
-            for __, st in pairs(ld.stations) do
-                if st.times and #st.times > maxG then maxG = #st.times end
-            end
-            if maxG == 0 then maxG = 1 end
-            for g = 1, maxG do
+            -- 按行程推算逐车次跟踪：从首个有时刻的停靠站的每个槽位出发，按区间运行时间估算
+            -- 到达下一站的时刻并选取最接近的槽位（而非按槽位序号配对）。
+            -- 交路线：末站为换乘站，列车到站即换下一交路，不画本线发车，也不折返/循环闭合。
+            for _, run in ipairs(diagramTrains.buildRuns(ld.stations, ld.legTimes or {}, isJRL)) do
                 local polylines = {}
                 local cur = {}
-                local timeOffset = 0
-                local prevDep = nil
-                for fIdx = 1, #ld.stations do
-                    local st = ld.stations[fIdx]
-                    if st then
-                        local y = yMap[st.uniqueKey]
-                        if not y then
-                            -- 该停站不在当前运行图纵轴上
-                            -- 车站：跨线车次的异线车站 → 方案A断开折线
-                            -- 路径点：仅"沿轨道经过"的路径控制点 → 静默跳过（不添加点也不断开）
-                            if st.stopType == "station" then
-                                if #cur > 0 then
-                                    polylines[#polylines + 1] = cur
-                                    cur = {}
-                                end
-                            end
-                        else
-                            local t = nil
-                            if st.times and #st.times >= g then
-                                t = st.times[g]
-                            end
-                            if t then
-                                local arr = t[1] * 60 + t[2]
-                                local dep = t[3] * 60 + t[4]
-                                if prevDep and (timeOffset + arr) < prevDep then
-                                    timeOffset = timeOffset + 3600
-                                end
-                                local uwArr = timeOffset + arr
-                                local uwDep = timeOffset + dep
-                                if uwDep < uwArr then
-                                    uwDep = uwDep + 3600
-                                end
-                                if fIdx > 1 then
-                                    table.insert(cur, {uw = uwArr, y = y})
-                                end
-                                local isTerminalReturn = (ld.stations[1] and st.uniqueKey == ld.stations[1].uniqueKey) and (fIdx == #ld.stations)
-                                if isJRL and fIdx == #ld.stations then
-                                    -- 交路线：末站为换乘站，列车到站即换下一交路，不画本线发车
-                                    prevDep = uwArr
-                                elseif not isTerminalReturn then
-                                    table.insert(cur, {uw = uwDep, y = y})
-                                    prevDep = uwDep
-                                else
-                                    prevDep = uwArr
-                                end
-                            end
+                for vi, visit in ipairs(run) do
+                    local st = ld.stations[visit.flatIdx]
+                    local y = yMap[st.uniqueKey]
+                    if not y then
+                        -- 该停站不在当前运行图纵轴上
+                        -- 车站：跨线车次的异线车站 → 方案A断开折线
+                        -- 路径点：仅"沿轨道经过"的路径控制点 → 静默跳过（不添加点也不断开）
+                        if st.stopType == "station" and #cur > 0 then
+                            polylines[#polylines + 1] = cur
+                            cur = {}
+                        end
+                    elseif visit.arr then
+                        if vi > 1 then
+                            table.insert(cur, {uw = visit.arr, y = y})
+                        end
+                        if visit.dep then
+                            table.insert(cur, {uw = visit.dep, y = y})
                         end
                     end
                 end
                 if #cur > 0 then
                     polylines[#polylines + 1] = cur
-                end
-
-                -- 循环闭合：连接最后一折线的末端到下一周期始发站的到达
-                -- 交路模式：交路线不折返（在末站换乘去下一交路），跳过循环闭合段
-                if not isJRL and #polylines > 0 and #ld.stations >= 1 then
-                    local firstSt = ld.stations[1]
-                    local lastSt = ld.stations[#ld.stations]
-                    local firstY = yMap[firstSt.uniqueKey]
-                    local lastY = yMap[lastSt.uniqueKey]
-                    if firstY and firstY ~= lastY then
-                        local nextG = (g % maxG) + 1
-                        if firstSt.times and #firstSt.times >= nextG then
-                            local t = firstSt.times[nextG]
-                            if t then
-                                local arr = t[1] * 60 + t[2]
-                                if (timeOffset + arr) < prevDep then
-                                    timeOffset = timeOffset + 3600
-                                end
-                                local uwArr = timeOffset + arr
-                                local lastPl = polylines[#polylines]
-                                table.insert(lastPl, {uw = uwArr, y = firstY})
-                                if g < maxG then
-                                    local dep = t[3] * 60 + t[4]
-                                    local uwDep = timeOffset + dep
-                                    if uwDep < uwArr then
-                                        uwDep = uwDep + 3600
-                                    end
-                                    table.insert(lastPl, {uw = uwDep, y = firstY})
-                                end
-                            end
-                        end
-                    end
                 end
 
                 lv:setWidth(lw)
