@@ -1057,6 +1057,23 @@ function timetable.isStandby(vehicleId)
     return false
 end
 
+-- 运行图车站纵向间距："equal" 等距 / "distance" 按线路距离 / "time" 按运行时间。默认 "equal"。
+-- 与时间标签位置同样持久化：存 timetableObject（随存档）+ _G（模块重载存活）。
+local rowSpacingModes = { equal = true, distance = true, time = true }
+
+function timetable.getRowSpacing()
+    if rowSpacingModes[_G._diagramRowSpacing] then return _G._diagramRowSpacing end
+    local v = timetableObject._diagramRowSpacing
+    if rowSpacingModes[v] then return v end
+    return "equal"
+end
+
+function timetable.setRowSpacing(v)
+    if not rowSpacingModes[v] then v = "equal" end
+    timetableObject._diagramRowSpacing = v
+    _G._diagramRowSpacing = v
+end
+
 function timetable.setHasTimetable(line, bool)
     if timetableObject[tostring(line)] then
         timetableObject[tostring(line)].hasTimetable = bool

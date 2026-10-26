@@ -1,6 +1,7 @@
 local timetable = require "celmi/timetables/timetable"
 local timetableHelper = require "celmi/timetables/timetable_helper"
 local diagramTrains = require "celmi/timetables/diagram_trains"
+local diagramLayout = require "celmi/timetables/diagram_layout"
 -- 交路系统已独立为 TrainRoute mod：这里通过 _G._trainRouteDiagramHook 读取它的
 -- getDiagramMode()/isConfigLine() 来决定"交路运行图模式"绘制；未安装 TrainRoute 时钩子为 nil，
 -- 运行图按普通模式绘制（与无交路系统时一致）。
@@ -122,6 +123,10 @@ local D = {
     zoom_time_interval = _("diagram_zoom_time_interval_i18n") or "Time Interval:",
     zoom_station_interval = _("diagram_zoom_station_interval_i18n") or "Station Interval:",
     zoom_restore = _("diagram_zoom_restore_i18n") or "Restore Default",
+    settings_spacing = _("diagram_settings_spacing_i18n"),
+    settings_spacing_equal = _("diagram_settings_spacing_equal_i18n"),
+    settings_spacing_distance = _("diagram_settings_spacing_distance_i18n"),
+    settings_spacing_time = _("diagram_settings_spacing_time_i18n"),
     punctuality = _("diagram_punctuality_i18n"),
     punct_ontime = _("diagram_punct_ontime_i18n"),
     punct_early = _("diagram_punct_early_i18n"),
@@ -334,11 +339,6 @@ local function getActivePresetName()
     return p and p.name or ""
 end
 
-local function stationToY(idx, total, height)
-    if total <= 1 then return height / 2 end
-    return (1 - (idx - 1) / (total - 1)) * height
-end
-
 local function sortAllStations()
     table.sort(allStations, function(a, b)
         if a.selected ~= b.selected then return a.selected end
@@ -379,8 +379,8 @@ local function getAllTimetableData()
             id = lineID, name = lineInfo.name, stations = {},
             color = savedColor or getColor(#data + 1),
             selected = false, bold = false, checked = true,
-            legTimes = timetableHelper.getLegTimeEstimates(lineID),
         }
+        lineData.legTimes, lineData.legDistances = timetableHelper.getLegEstimates(lineID)
         for flatIdx, stopInfo in ipairs(stops) do
             local displayName = stopInfo.name
             local gk = stopInfo.gwKey
@@ -570,6 +570,73 @@ local function createColorChooserButton(lineData, onSelected)
     return btn
 end
 
+-- 车站位置缓存（站组实体 → {x, y}），车站位置基本不变，避免每次刷新都查询
+local stationPosCache = {}
+local function getStationPos(id)
+    local key = tostring(id)
+    if stationPosCache[key] == nil then
+        local x, y = timetableHelper.getEntityPosition(tonumber(id))
+        stationPosCache[key] = x and {x, y} or false
+    end
+    return stationPosCache[key] or nil
+end
+
+-- 按设置计算各行（排序组）的纵坐标：
+--   equal    等距
+--   distance 沿线路的站间直线距离（各线路、双向取平均），无线路经过的相邻行用两行车站的直线距离补
+--   time     沿线路的区间运行时间估算（各线路、双向取平均），缺失的按距离换算补
+local function computeRowYs(keyRow, sorts, labelGroups, h)
+    local nRows = #sorts
+    local mode = timetable.getRowSpacing()
+    if mode == "equal" or nRows <= 1 then
+        return diagramLayout.rowYs(nil, nRows, h)
+    end
+    local direct = {}
+    local prevPos = nil
+    for i, sv in ipairs(sorts) do
+        local pos = nil
+        for _, s in pairs(labelGroups[sv]) do
+            if s.stopType == "station" then
+                pos = getStationPos(s.id)
+                if pos then break end
+            end
+        end
+        if pos and prevPos then
+            direct[i - 1] = math.sqrt((pos[1] - prevPos[1]) ^ 2 + (pos[2] - prevPos[2]) ^ 2)
+        end
+        prevPos = pos
+    end
+    local function linesWith(metricKey)
+        local r = {}
+        for _, ld in pairs(displayedLines) do
+            r[#r + 1] = { stations = ld.stations, metric = ld[metricKey] or {} }
+        end
+        return r
+    end
+    local gaps = diagramLayout.fillGaps(
+        diagramLayout.lineGaps(linesWith("legDistances"), keyRow, nRows), direct, nRows - 1)
+    if mode == "time" then
+        gaps = diagramLayout.fillGaps(
+            diagramLayout.lineGaps(linesWith("legTimes"), keyRow, nRows), gaps, nRows - 1)
+    end
+    return diagramLayout.rowYs(gaps, nRows, h)
+end
+
+-- 缩放窗口：把整图的行位置（rowFracs，首行 1、末行 0）映射为纵坐标，使窗口首行 y = h、
+-- 窗口末行 y = 0；窗口外的行按同一刻度外推（可能超出 [0,h]，由绘制时裁剪）。
+local function windowRowYs(rowFracs, rWin0, rWinLen, h)
+    local ys = {}
+    local fLo, fHi = rowFracs[rWin0], rowFracs[rWin0 + rWinLen - 1]
+    for i, f in ipairs(rowFracs) do
+        if rWinLen <= 1 or not fLo or not fHi or fLo == fHi then
+            ys[i] = h / 2
+        else
+            ys[i] = (f - fHi) / (fLo - fHi) * h
+        end
+    end
+    return ys
+end
+
 -- 运行图放大（2026-08-16 功能）：保持画布大小不变，改变绘制范围来放大运行图。
 --   tStart/tLen = 时间窗口（分钟，0-60 内）；rStart/rLen = 车站行窗口（1-based 行排名）。
 --   active=false → 完整视图（0-60 分、全部行）。关窗即重置（临时查看辅助，不持久化）。
@@ -643,20 +710,20 @@ local function clampZoom(totalRanks)
 end
 
 -- 构建 Y 轴映射：所有选中行都有 Y 值（2026-08-16 放大功能）。
--- 窗口外的行用同一窗口刻度外推（stationToY(i - rWin0 + 1, rWinLen, h)），可能超出 [0,h]——
+-- 行位置按"车站间距"设置计算（computeRowYs），再按缩放窗口映射（windowRowYs）；
+-- 窗口外的行用同一窗口刻度外推，可能超出 [0,h]——
 -- 折线段跨越车站窗口边界时由 drawClippedSegment 按窗口 Y 范围 [0,dh] 裁剪（横向截断点正常绘制，
 -- 不再因窗口外站无 Y 值而整段断线）。非选中的跨线车站（uniqueKey 不在 map 里）仍断线（原行为）。
 local function buildYMap(selList, groups, sorts, rWin0, rWinLen, h)
-    local map = {}
+    local keyRow = {}
     for i, sv in ipairs(sorts) do
-        local y = stationToY(i - rWin0 + 1, rWinLen, h)
         for _, s in pairs(groups[sv]) do
             if s.stopType == "station" then
                 local eid = tostring(s.id)
                 for _, ld in pairs(allLines) do
                     for _, st in pairs(ld.stations) do
                         if st.stopType == "station" and tostring(st.id) == eid then
-                            map[st.uniqueKey] = y
+                            keyRow[st.uniqueKey] = i
                         end
                     end
                 end
@@ -665,17 +732,20 @@ local function buildYMap(selList, groups, sorts, rWin0, rWinLen, h)
                     for _, ld in pairs(allLines) do
                         for _, st in pairs(ld.stations) do
                             if st.stopType == "waypoint" and st.entityId == s.entityId then
-                                map[st.uniqueKey] = y
+                                keyRow[st.uniqueKey] = i
                             end
                         end
                     end
                 else
-                    map[s.uniqueKey] = y
+                    keyRow[s.uniqueKey] = i
                 end
             end
         end
     end
-    return map
+    local rowYs = windowRowYs(computeRowYs(keyRow, sorts, groups, 1), rWin0, rWinLen, h)
+    local map = {}
+    for k, i in pairs(keyRow) do map[k] = rowYs[i] end
+    return map, rowYs
 end
 
 -- 清除运行图渲染区（折线视图 + 站名标签 + 时间标签），全部 pcall 保护。
@@ -766,7 +836,7 @@ local function refreshDiagram()
     local function timeX(m)  -- m = 分钟
         return (m - tWin0) / (tWin1 - tWin0) * dw
     end
-    local yMap = buildYMap(selList, groups, sorts, rWin0, rWinLen, dh)
+    local yMap, rowYs = buildYMap(selList, groups, sorts, rWin0, rWinLen, dh)
 
     for _, v in pairs(menu.lineRenderViews) do
         if menu.renderLayout then pcall(function() menu.renderLayout:removeItem(v) end) end
@@ -797,7 +867,7 @@ local function refreshDiagram()
         end
     end
     for i = rWin0, rWin0 + rWinLen - 1 do
-        local y = stationToY(i - rWin0 + 1, rWinLen, dh)
+        local y = rowYs[i]
         rv:addLine(api.type.Vec2f.new(0, y), api.type.Vec2f.new(dw, y))
     end
 
@@ -839,7 +909,7 @@ local function refreshDiagram()
             if #rows > 0 then
                 local nameTag = nextLabelName()
                 local ok2, result = pcall(function()
-                    local y = stationToY(idx - rWin0 + 1, rWinLen, dh)
+                    local y = rowYs[idx]
                     local contH = #rows * labelH
                     local cont = api.gui.comp.Component.new("stCont_" .. sv .. "_" .. nameTag)
                     cont:setMinimumSize(api.gui.util.Size.new(STATION_LABEL_WIDTH, contH))
@@ -1934,13 +2004,14 @@ function diagramGUI.showDiagram()
             -- 分区1 "刷新频率"：勾选 10s 自动刷新 或 手动刷新（互斥）
             -- 分区2 "时间标签"：位置（上/下下拉）+ 时间刻度（2/5/10分下拉，默认5分）
             -- 分区3 "准点判定阈值"：0/5/10/20/30/40/50/60s 下拉（默认10s）
+            -- 分区5 "车站间距"：等距 / 按距离 / 按运行时间 下拉（默认等距）
             -- 点"确定"应用设置并刷新运行图；设置存 timetableObject 随存档永久保存，
             -- 并置 _diagramForceSync 触发跨线程同步（GUI→引擎 state.timetable）。
             local cc = api.gui.comp.Component.new("settingsContent")
             local cl = api.gui.layout.BoxLayout.new("VERTICAL")
             cc:setLayout(cl)
-            cc:setMinimumSize(api.gui.util.Size.new(320, 390))
-            cc:setMaximumSize(api.gui.util.Size.new(320, 390))
+            cc:setMinimumSize(api.gui.util.Size.new(320, 450))
+            cc:setMaximumSize(api.gui.util.Size.new(320, 450))
 
             local curAuto = timetable.getDiagramAutoRefresh()
             local curPos = timetable.getTimeLabelPos()
@@ -1954,6 +2025,7 @@ function diagramGUI.showDiagram()
             local selScale = curScale
             local selPunct = curPunct
             local selFilter = curFilter
+            local selSpacing = timetable.getRowSpacing()
 
             local function makeSectionLabel(text)
                 local lbl = api.gui.comp.TextView.new(text)
@@ -2044,6 +2116,17 @@ function diagramGUI.showDiagram()
                 selFilter = FILTER_VALUES[i + 1] or "all"
             end)
 
+            -- 分区5：车站间距（等距 / 按线路距离 / 按运行时间）
+            cl:addItem(makeSectionLabel(D.settings_spacing))
+
+            local SPACING_ITEMS = { D.settings_spacing_equal, D.settings_spacing_distance, D.settings_spacing_time }
+            local SPACING_VALUES = { "equal", "distance", "time" }
+            local spacingCurIdx = 0
+            for i, v in ipairs(SPACING_VALUES) do if v == selSpacing then spacingCurIdx = i - 1 end end
+            makeComboRow("", "settingRowSpacing", SPACING_ITEMS, spacingCurIdx, function(i)
+                selSpacing = SPACING_VALUES[i + 1] or "equal"
+            end)
+
             local btnRow = api.gui.comp.Component.new("settingBtns")
             local btnRl = api.gui.layout.BoxLayout.new("HORIZONTAL")
             btnRow:setLayout(btnRl)
@@ -2056,7 +2139,7 @@ function diagramGUI.showDiagram()
             settingsWinRef = w
             w:addHideOnCloseHandler()
             w:setMovable(true)
-            w:setSize(api.gui.util.Size.new(340, 430))
+            w:setSize(api.gui.util.Size.new(340, 490))
             w:setPosition(400, 300)
 
             autoBtn:onClick(function()
@@ -2077,12 +2160,14 @@ function diagramGUI.showDiagram()
                 -- 3) 时间刻度（重绘网格竖线 + 时间标签步长）
                 -- 4) 准点判定阈值（重算晚点/正点/早点分类）
                 -- 5) 运行方向筛选（重绘折线：只画往上/往下/全部）
+                -- 6) 车站间距（重算各行纵坐标）
                 local okApply, applyErr = pcall(function()
                     timetable.setDiagramAutoRefresh(selAuto)
                     timetable.setTimeLabelPos(selPos)
                     timetable.setTimeScale(selScale)
                     timetable.setPunctThreshold(selPunct)
                     timetable.setPolylineFilter(selFilter)
+                    timetable.setRowSpacing(selSpacing)
                     _G._diagramForceSync = true
                     applyTimeLabelPosition()
                     -- 布局切换（ca 重放/尺寸/时间条可见性）需要一帧让引擎重排收敛后再刷新——
