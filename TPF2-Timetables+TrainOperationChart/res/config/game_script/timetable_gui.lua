@@ -117,6 +117,7 @@ local UIStrings = {
 		min_wait = _("diagram_min_wait_i18n"),
 		max_wait = _("diagram_max_wait_i18n"),
 		help = _("diagram_help_i18n"),
+		help_text = _("diagram_help_text_i18n"),
 	}
 
 local local_styles = {
@@ -554,82 +555,15 @@ function timetableGUI.showLineMenu()
     menu.tabWidget:addTab(api.gui.comp.TextView.new(UIStrings.settings), wrapper3)
 
     -- Help page (to the right of the "Settings" tab, a separate page next to it -- final user decision, no popup):
-    -- explains how the line control switches (depart on time / min / max dwell time) combine. The long help text is inlined per language
-    -- (one Chinese version each for zh_CN/zh_TW, English for all other languages) instead of going line by line through strings.lua (i18n convention: non-Chinese = English).
-    local helpText = nil
-    do
-        local helpLang = api.util.getLanguage()
-        local hlc = (helpLang and helpLang.code) or "en"
-        if hlc == "zh_CN" then
-            helpText = {
-                { 0, "【线路控车 说明】" },
-                { 0, "◇ 到点发车 ✓：" },
-                { 1, "到点强制发车，无论装卸是否完成。" },
-                { 1, "（勾选后 最小/最大停站时间 会自动清空、不可再勾）" },
-                { 0, "◇ 到点发车 ✗：可单独或组合勾选 最小/最大停站时间。" },
-                { 0, "■ 勾 最小停站时间：" },
-                { 1, "列车在站内至少停满“最小停站时间”。" },
-                { 1, "· 装卸完成：发车时刻未到 → 等到点再发车；" },
-                { 2, "已过发车时刻 → 停满最小时间后发车（晚点超容差仍扣到下一趟）。" },
-                { 1, "· 装卸未完成：继续装卸，装完后再按上条判定。" },
-                { 1, "※ 游戏默认最小停站时间 = 0 秒，不调大则此勾选无实际效果。" },
-                { 0, "■ 勾 最大停站时间：" },
-                { 1, "给停站时长设上限，防止“死等下一趟 / 装卸拖沓”。" },
-                { 1, "· 发车时刻未到：自由装卸，等到点，到点发车（装没装完都发）。" },
-                { 1, "· 已过发车时刻：" },
-                { 2, "装完且晚点在容差内 → 立刻发车；" },
-                { 2, "装完但晚点超容差 / 一直没装完 → 最迟停到“到站+最大停站时间”强制发车。" },
-                { 0, "■ 最小+最大 同时勾：" },
-                { 1, "停站时长限制在 [最小, 最大] 区间内（上面两条合并）。" },
-            }
-        elseif hlc == "zh_TW" then
-            helpText = {
-                { 0, "【線路控車 說明】" },
-                { 0, "◇ 到點發車 ✓：" },
-                { 1, "到點強制發車，無論裝卸是否完成。" },
-                { 1, "（勾選後 最小/最大停站時間 會自動清空、不可再勾）" },
-                { 0, "◇ 到點發車 ✗：可單獨或組合勾選 最小/最大停站時間。" },
-                { 0, "■ 勾 最小停站時間：" },
-                { 1, "列車在站內至少停滿「最小停站時間」。" },
-                { 1, "· 裝卸完成：發車時刻未到 → 等到點再發車；" },
-                { 2, "已過發車時刻 → 停滿最小時間後發車（晚點超容差仍扣到下一趟）。" },
-                { 1, "· 裝卸未完成：繼續裝卸，裝完後再按上條判定。" },
-                { 1, "※ 遊戲預設最小停站時間 = 0 秒，不調大則此勾選無實際效果。" },
-                { 0, "■ 勾 最大停站時間：" },
-                { 1, "給停站時長設上限，防止「死等下一趟 / 裝卸拖沓」。" },
-                { 1, "· 發車時刻未到：自由裝卸，等到點，到點發車（裝沒裝完都發）。" },
-                { 1, "· 已過發車時刻：" },
-                { 2, "裝完且晚點在容差內 → 立刻發車；" },
-                { 2, "裝完但晚點超容差 / 一直沒裝完 → 最遲停到「到站+最大停站時間」強制發車。" },
-                { 0, "■ 最小+最大 同時勾：" },
-                { 1, "停站時長限制在 [最小, 最大] 區間內（上面兩條合併）。" },
-            }
-        else
-            helpText = {
-                { 0, "[Line control switches]" },
-                { 0, "◇ Force departure ✓:" },
-                { 1, "Departure is FORCED at the scheduled time, even if loading is not finished." },
-                { 1, "(Ticking it clears and disables Min./Max. wait)" },
-                { 0, "◇ Force departure ✗ — tick Min./Max. wait alone or together:" },
-                { 0, "■ Min. wait ticked:" },
-                { 1, "The train must stay at the station at least the \"min waiting time\"." },
-                { 1, "· Loading finished: before departure time → wait until it departs;" },
-                { 2, "past departure time → leave once the min. time is met (still waits for" },
-                { 2, "the next slot if the delay exceeds the tolerance)." },
-                { 1, "· Loading not finished: keep loading, then apply the rules above." },
-                { 1, "Note: the game default min waiting time is 0 s — no real effect unless raised." },
-                { 0, "■ Max. wait ticked:" },
-                { 1, "Caps the dwell time (avoids waiting forever / endless loading)." },
-                { 1, "· Before departure time: load freely; leave AT the departure time" },
-                { 2, "(forced, even if loading is unfinished)." },
-                { 1, "· Past departure time:" },
-                { 2, "loading done & delay within tolerance → leave immediately;" },
-                { 2, "loading done but beyond tolerance, or still loading → forced out no" },
-                { 2, "later than \"arrival + max waiting time\"." },
-                { 0, "■ Min. + Max. both ticked:" },
-                { 1, "Dwell time is clamped to the [min, max] interval (rules above combined)." },
-            }
-        end
+    -- explains how the line control switches (depart on time / min / max dwell time) combine.
+    -- The text comes from strings.lua (diagram_help_text_i18n); one TextView per line, empty lines become spacers.
+    local helpText = {}
+    for line in (UIStrings.help_text .. "\n"):gmatch("(.-)\r?\n") do
+        helpText[#helpText + 1] = line
+    end
+    -- Drop trailing blank lines (the closing ]] of the long string in strings.lua is indented)
+    while #helpText > 0 and helpText[#helpText]:match("^%s*$") do
+        helpText[#helpText] = nil
     end
     local wrapper4 = api.gui.comp.Component.new("wrapper4")
     local helpLayout = api.gui.layout.BoxLayout.new("VERTICAL")
@@ -637,13 +571,13 @@ function timetableGUI.showLineMenu()
     local helpLang = api.util.getLanguage()
     local helpStyle = local_styles[helpLang and helpLang.code or "en"]
     for _, li in ipairs(helpText) do
-        if li[2] == "" then
+        if li == "" then
             local spacer = api.gui.comp.Component.new("helpSpacer")
             spacer:setMinimumSize(api.gui.util.Size.new(10, 8))
             spacer:setMaximumSize(api.gui.util.Size.new(10, 8))
             helpLayout:addItem(spacer)
         else
-            local t = api.gui.comp.TextView.new(string.rep("   ", li[1]) .. li[2])
+            local t = api.gui.comp.TextView.new(li)
             if helpStyle then t:setStyleClassList({ helpStyle }) end
             helpLayout:addItem(t)
         end
