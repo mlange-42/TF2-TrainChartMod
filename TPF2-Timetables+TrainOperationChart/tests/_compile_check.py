@@ -4,7 +4,7 @@ from lupa import LuaRuntime
 lua = LuaRuntime(unpack_returned_tuples=True)
 g = lua.globals()
 print("LUA VERSION:", g._VERSION)
-loadfn = g.loadstring or g.load  # 5.1: loadstring；5.2+: load
+loadfn = g.loadstring or g.load  # 5.1: loadstring; 5.2+: load
 pcall = g.pcall
 
 files = [

@@ -248,10 +248,10 @@ local mediziner = {
 local availableColorSchemes = {
     defaultColors, marc345, mediziner
 }
--- 防御：引擎在加载存档后会重建样式表，此时 game.config.gui 可能尚未初始化。
--- 模块顶层直接访问 game.config.gui.lineColors 会抛 "attempt to index a nil value (field 'gui')"，
--- 导致 "Failed to load .../timetable_colors.lua"，与进存档崩溃（AN ERROR IS OCCURED）强相关。
--- 包 pcall 保护：取不到线路颜色方案时仅跳过，不影响样式表其余内容。
+-- Defensive: the engine rebuilds style sheets after loading a save, when game.config.gui may not be initialized yet.
+-- Accessing game.config.gui.lineColors at module top level throws "attempt to index a nil value (field 'gui')",
+-- causing "Failed to load .../timetable_colors.lua", strongly correlated with the crash on loading a save (AN ERROR IS OCCURED).
+-- Wrapped in pcall: if the line color scheme is unavailable it is just skipped, without affecting the rest of the style sheet.
 pcall(function()
     if game and game.config and game.config.gui and game.config.gui.lineColors then
         table.insert(availableColorSchemes, game.config.gui.lineColors)
@@ -275,9 +275,9 @@ function data()
 
     for _, schema in ipairs(availableColorSchemes) do
         for _, color in ipairs(schema) do
-            -- 防御：线路颜色方案（game.config.gui.lineColors）条目结构可能不是标准 {r,g,b}，
-            -- 例如 userdata 或 nil 条目，直接取 color[1]/color[2]/color[3] 会抛 Lua 错误。
-            -- 单个坏条目跳过，不影响其余样式。
+            -- Defensive: entries of the line color scheme (game.config.gui.lineColors) may not be a standard {r,g,b},
+            -- e.g. userdata or nil entries; reading color[1]/color[2]/color[3] directly would throw a Lua error.
+            -- A single bad entry is skipped without affecting the remaining styles.
             if type(color) ~= "table" or type(color[1]) ~= "number"
                or type(color[2]) ~= "number" or type(color[3]) ~= "number" then
                 goto continueColor
