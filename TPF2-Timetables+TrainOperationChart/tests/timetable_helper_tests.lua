@@ -1,14 +1,14 @@
--- 路径点全局命名 key 回归测试：同一物理路径点在多线路中必须得到同一个 key，
--- 且改名不能改变 key（保证 _gwNames 一实体一名、跨线路全局同步）。
--- 实测（2026-08-05）：v.waypoints[i] 是 SignalId 结构，暴露数字字段 entity（SignalList 实体号）
--- + index（信号列表内序号），key 用 gws_<entity>_<index>。
+-- Regression tests for global waypoint name keys: the same physical waypoint must get the same key on all lines,
+-- and renaming must not change the key (ensures _gwNames has one name per entity, synced globally across lines).
+-- Verified (2026-08-05): v.waypoints[i] is a SignalId struct exposing numeric fields entity (SignalList entity id)
+-- + index (position within the signal list); key is gws_<entity>_<index>.
 _G = _G
 _ = function(s) return s end
 
--- 清除 timetable_tests 写入的 helper 桩，加载真实模块
+-- Clear the helper stubs written by timetable_tests and load the real module
 package.loaded["celmi/timetables/timetable_helper"] = nil
 
--- 模拟"旧式"路径点（无 .entity/.index，走 edge+pos 降级链）需要的 API 桩
+-- API stubs needed to simulate "old-style" waypoints (no .entity/.index, using the edge+pos fallback chain)
 local oldWaypointDb = {}
 local function makeOldWaypoint(edge, x, y, name)
     local wp = { edge = edge, x = x, y = y, name = name }
@@ -60,7 +60,7 @@ local function addTest(fn)
 end
 
 addTest(function()
-    -- 同一物理路径点（相同 entity+index）在两条不同线路（不同父站/序号）里 key 必须一致
+    -- The same physical waypoint (same entity+index) must get the same key on two different lines (different parent station/index)
     local wpA = { entity = 7154, index = 0, name = "A" }
     local k1 = th.getWaypointEntityKey(wpA, 500, 3)
     local k2 = th.getWaypointEntityKey(wpA, 700, 1)
@@ -69,7 +69,7 @@ addTest(function()
 end)
 
 addTest(function()
-    -- 改名不能改变 key
+    -- Renaming must not change the key
     local wpA = { entity = 7154, index = 0, name = "A" }
     local before = th.getWaypointEntityKey(wpA, 500, 3)
     wpA.name = "Renamed"
@@ -78,21 +78,21 @@ addTest(function()
 end)
 
 addTest(function()
-    -- 不同实体（不同 SignalList 实体号）key 必须不同
+    -- Different entities (different SignalList entity ids) must get different keys
     local wpA = { entity = 7154, index = 0, name = "A" }
     local wpB = { entity = 7155, index = 0, name = "B" }
     assert(th.getWaypointEntityKey(wpA, 500, 3) ~= th.getWaypointEntityKey(wpB, 500, 3), "distinct waypoints share a key")
 end)
 
 addTest(function()
-    -- 同一 SignalList 实体上不同序号的路径点 key 必须不同（区分同一条边多个路径点）
+    -- Waypoints with different indices on the same SignalList entity must get different keys (distinguishes multiple waypoints on one edge)
     local wpA = { entity = 7154, index = 0, name = "A" }
     local wpC = { entity = 7154, index = 3, name = "C" }
     assert(th.getWaypointEntityKey(wpA, 500, 3) ~= th.getWaypointEntityKey(wpC, 500, 3), "same-entity diff-index waypoints share a key")
 end)
 
 addTest(function()
-    -- 无 .entity 的旧式路径点：edge+坐标降级，仍与线路无关
+    -- Old-style waypoint without .entity: edge+position fallback, still independent of the line
     local wpD = makeOldWaypoint(9001, 12.34, 56.78, "D")
     local k1 = th.getWaypointEntityKey(wpD, 111, 2)
     local k2 = th.getWaypointEntityKey(wpD, 222, 5)
@@ -101,25 +101,25 @@ addTest(function()
 end)
 
 addTest(function()
-    -- getAllTimetableRailVehicles 必须按 hasTimetable 过滤（控车开关回归，用户反馈）：
-    -- 只返回"勾选了遵循时刻表"的线路车辆；未勾选线路 / 无时刻表条目线路的车辆一律排除，
-    -- 保证引擎协程不会对它们调用 stopVehicle/startVehicle（此前过滤丢失 → 未勾选线路
-    -- 列车到站后被硬扣、永远不发车；勾选再取消才被放行）。
-    -- 回归1：返回值必须是"车辆 ID 数组"（协程 for _,v in pairs() 取值当车辆 ID 用）——
-    -- 若返回 {车辆ID:线路ID} 映射表，协程拿到线路 ID，waitingRequired(线路ID) 内
-    -- getComponent(线路, TRANSPORT_VEHICLE) 触发 C++ assert（GetComponentDataIndex）。
-    -- 回归2：getVehiclesWithState 快照可能含刚删除的失效 ID，必须先 entityExists 校验
-    -- 再 getComponent（AGENTS.md：getComponent 对无效实体 = C++ assert，pcall 抓不住）。
+    -- getAllTimetableRailVehicles must filter by hasTimetable (vehicle control switch regression, user report):
+    -- only return vehicles of lines with "follow timetable" ticked; vehicles of unticked lines / lines without timetable entries are excluded,
+    -- so the engine coroutine never calls stopVehicle/startVehicle on them (previously the filter was lost -> trains of unticked lines
+    -- were held at stations forever and never departed; only ticking and unticking released them).
+    -- Regression 1: the return value must be an "array of vehicle IDs" (the coroutine's for _,v in pairs() uses the values as vehicle IDs) --
+    -- if it returned a {vehicleID:lineID} map, the coroutine would get line IDs, and inside waitingRequired(lineID)
+    -- getComponent(line, TRANSPORT_VEHICLE) triggers a C++ assert (GetComponentDataIndex).
+    -- Regression 2: the getVehiclesWithState snapshot may contain just-deleted, invalid IDs; entityExists must be checked
+    -- before getComponent (AGENTS.md: getComponent on an invalid entity = C++ assert, not catchable by pcall).
     local savedGetComponent = api.engine.getComponent
     local savedTransportSystem = api.engine.system.transportVehicleSystem
     local savedEntityExists = api.engine.entityExists
     api.engine.system.transportVehicleSystem = {
         getVehiclesWithState = function(state)
-            return { 10, 20, 30, 40, 99 }  -- 99 = 刚被删除的失效 ID（快照残留）
+            return { 10, 20, 30, 40, 99 }  -- 99 = just-deleted invalid ID (snapshot leftover)
         end,
     }
     api.engine.entityExists = function(id)
-        return id ~= 99   -- 99 已删除，其余存在
+        return id ~= 99   -- 99 was deleted, the others exist
     end
     api.engine.getComponent = function(v, ctype)
         local lineOf = { [10] = 100, [20] = 100, [30] = 200, [40] = 300 }
@@ -129,7 +129,7 @@ addTest(function()
     api.type.enum = api.type.enum or {}
     api.type.enum.TransportVehicleState = api.type.enum.TransportVehicleState or { AT_TERMINAL = "AT_TERMINAL" }
     api.type.ComponentType.TRANSPORT_VEHICLE = 70
-    local hasTT = function(line) return line == 100 end  -- 只有线路100勾选了遵循时刻表
+    local hasTT = function(line) return line == 100 end  -- only line 100 has "follow timetable" ticked
     local res = th.getAllTimetableRailVehicles(hasTT)
     local has = {}
     for _, id in ipairs(res) do has[tostring(id)] = true end
@@ -144,45 +144,45 @@ addTest(function()
 end)
 
 addTest(function()
-    -- Liang-Barsky 线段裁剪回归（运行图放大功能用）：窗口 [0,6]×[0,100]
-    -- 场景1：完全在窗口内 → 原样返回
+    -- Liang-Barsky segment clipping regression (used by diagram zoom): window [0,6]x[0,100]
+    -- Case 1: fully inside the window -> returned unchanged
     local x1, y1, x2, y2 = th.clipSegmentToRect(1, 10, 5, 90, 0, 6, 0, 100)
     assert(x1 == 1 and y1 == 10 and x2 == 5 and y2 == 90, "inside segment unchanged")
 
-    -- 场景2：横穿右边界（时间窗口）→ 在 x=6 处截断，y 插值
+    -- Case 2: crosses the right edge (time window) -> cut at x=6, y interpolated
     x1, y1, x2, y2 = th.clipSegmentToRect(4, 20, 10, 80, 0, 6, 0, 100)
     assert(x1 == 4 and x2 == 6, "right edge clipped: " .. tostring(x1) .. "," .. tostring(x2))
     assert(math.abs(y2 - (20 + (80-20) * (6-4)/(10-4))) < 0.001, "right edge y interpolated: " .. tostring(y2))
 
-    -- 场景3：整段在窗口右侧外 → nil
+    -- Case 3: entirely right of the window -> nil
     assert(th.clipSegmentToRect(8, 10, 12, 90, 0, 6, 0, 100) == nil, "fully right → nil")
 
-    -- 场景4：横穿左边界
+    -- Case 4: crosses the left edge
     x1, y1, x2, y2 = th.clipSegmentToRect(-2, 30, 3, 60, 0, 6, 0, 100)
     assert(x1 == 0 and x2 == 3, "left edge clipped: " .. tostring(x1) .. "," .. tostring(x2))
     assert(math.abs(y1 - (30 + (60-30) * (0-(-2))/(3-(-2)))) < 0.001, "left edge y interpolated: " .. tostring(y1))
 
-    -- 场景5：横穿上下边界（车站窗口，理论上不发生，防御）
+    -- Case 5: crosses the top/bottom edges (station window; shouldn't happen in theory, defensive)
     x1, y1, x2, y2 = th.clipSegmentToRect(1, 80, 5, 150, 0, 6, 0, 100)
     assert(y2 == 100, "top edge clipped: " .. tostring(y2))
 
-    -- 场景6：跨窗口全程（左外→右外）
+    -- Case 6: spans the whole window (outside left -> outside right)
     x1, y1, x2, y2 = th.clipSegmentToRect(-5, 10, 20, 90, 0, 6, 0, 100)
     assert(x1 == 0 and x2 == 6, "crossing both edges: " .. tostring(x1) .. "," .. tostring(x2))
     assert(math.abs(y1 - (10 + (90-10) * (0-(-5))/(20-(-5)))) < 0.001, "crossing y1 interpolated")
     assert(math.abs(y2 - (10 + (90-10) * (6-(-5))/(20-(-5)))) < 0.001, "crossing y2 interpolated")
 
-    -- 场景7：垂直线段（dx==0，防退化）
+    -- Case 7: vertical segment (dx==0, guards against degeneracy)
     x1, y1, x2, y2 = th.clipSegmentToRect(3, -10, 3, 110, 0, 6, 0, 100)
     assert(x1 == 3 and x2 == 3 and y1 == 0 and y2 == 100, "vertical segment clipped: " .. tostring(y1) .. "," .. tostring(y2))
     print("  OK: helper test #7 (clipSegmentToRect Liang-Barsky)")
 end)
 
 addTest(function()
-    -- 性能优化 A 组回归：getAllTimetableRailVehicles 的"反查口径"（传入勾选线路清单）必须与
-    -- 原口径（逐辆 getComponent 取线路）得到**同一个集合**——这是本次优化的正确性前提。
-    -- 场景：线路100 勾选（车 10/11 在站）、线路200 未勾选（车 20）、线路300 无条目（车 30）；
-    -- 车辆 99 是快照残留的失效 ID。
+    -- Performance optimization group A regression: the "reverse lookup method" of getAllTimetableRailVehicles (given the ticked line list) must yield
+    -- **the same set** as the original method (getComponent per vehicle to get its line) -- this is the correctness precondition of the optimization.
+    -- Scenario: line 100 ticked (vehicles 10/11 at station), line 200 not ticked (vehicle 20), line 300 without entries (vehicle 30);
+    -- vehicle 99 is an invalid ID left over in the snapshot.
     local saved = {
         getComponent = api.engine.getComponent,
         entityExists = api.engine.entityExists,
@@ -197,7 +197,7 @@ addTest(function()
     end
     api.engine.system.transportVehicleSystem = {
         getVehiclesWithState = function() return terminalList end,
-        -- 反查口径：只有线路100 在勾选清单里 → 它的车 = {10, 11}
+        -- Reverse lookup: only line 100 is in the ticked list -> its vehicles = {10, 11}
         getLineVehicles = function(line)
             if line == 100 then return { 10, 11 } end
             return {}
@@ -217,11 +217,11 @@ addTest(function()
     assert(has["99"] == nil, "invalid snapshot id excluded (entityExists guard kept)")
     print("  OK: helper perf (line-index scan == component scan)")
 
-    -- 自检回归：反查口径与真实归属不一致（getLineVehicles 漏车）时，必须自动退回原口径并给出
-    -- 正确结果（宁可慢也不能少控车）。
+    -- Self-check regression: if the reverse lookup disagrees with the actual ownership (getLineVehicles misses a vehicle), it must automatically fall back to the original method and give
+    -- the correct result (better slow than controlling too few vehicles).
     api.engine.system.transportVehicleSystem.getLineVehicles = function(line) return {} end
-    -- 注：自检每 60s 才有一次机会，这里直接再调一次——上次调用已把 nextCheckAt 设为 now+60，
-    -- 故用 os.clock 桩把时间推远，确保本次触发自检。
+    -- Note: the self-check only gets a chance every 60s; here we just call again -- the previous call set nextCheckAt to now+60,
+    -- so the os.clock stub pushes time far ahead to make sure this call triggers the self-check.
     local realClock = os.clock
     os.clock = function() return (realClock() or 0) + 1000 end
     local fallback = th.getAllTimetableRailVehicles(hasTT, { 100 })

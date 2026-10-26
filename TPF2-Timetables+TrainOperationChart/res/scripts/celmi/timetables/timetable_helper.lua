@@ -2,20 +2,20 @@ local diagramTrains = require "celmi/timetables/diagram_trains"
 
 local timetableHelper = {}
 
--- 调试汇总日志：受 _G._diagramDebug 开关控制（默认关闭），避免每次刷新/打开窗口的
--- 高频汇总日志（getAllStops/getAllStationEntities 等）对玩家造成日志刷屏与 I/O 负担。
+-- Debug summary logs: controlled by the _G._diagramDebug switch (off by default), to avoid flooding
+-- the log and I/O with high-frequency summaries (getAllStops/getAllStationEntities etc.) on every refresh/window open.
 local function dbgPrint(msg)
     if _G._diagramDebug then print("[DiagramGUI] " .. msg) end
 end
 
--- ===== 性能优化 A 组（2026-08-16 第 21 轮）：热路径的 pcall 目标提到模块级 =====
--- 原因（玩家反馈"每隔一段时间卡一两帧"的代码侧取证）：本文件与引擎协程里大量使用
+-- ===== Performance optimization group A (2026-08-16, round 21): hoist hot-path pcall targets to module level =====
+-- Reason (code-side evidence for player report "stutters for a frame or two every now and then"): this file and the engine coroutine heavily use
 --   pcall(function() return api.engine.xxx(...) end)
--- 每次执行都会**新建一个闭包对象**；这些函数在引擎协程里每帧被调用几十~上百次、
--- 在每秒的准点扫描里被调用上千次 → 每秒数万个临时对象 → Lua GC 周期变短 →
--- 表现为周期性掉 1~2 帧（现实时间、与游戏速度无关）。
--- 改为 pcall(fn, args...) 复用模块级函数：**错误保护语义完全不变**，只是不再产生闭包垃圾。
--- 注意：这些函数体只在**调用时**访问 api（模块加载顶层不碰 api —— AGENTS 铁律）。
+-- which **creates a new closure object** on every execution; these functions are called dozens to hundreds of times per frame in the engine coroutine,
+-- and thousands of times per second in the punctuality scan -> tens of thousands of temporary objects per second -> shorter Lua GC cycles ->
+-- shows up as periodic drops of 1-2 frames (in real time, independent of game speed).
+-- Changed to pcall(fn, args...) reusing module-level functions: **error protection semantics are unchanged**, just no more closure garbage.
+-- Note: these function bodies only access api **when called** (module top level never touches api -- AGENTS hard rule).
 local function _entityExists(id) return api.engine.entityExists(id) end
 local function _getComponent(id, ctype) return api.engine.getComponent(id, ctype) end
 local function _lineVehicles(line) return api.engine.system.transportVehicleSystem.getLineVehicles(line) end
@@ -30,18 +30,18 @@ local function _worldGameTime()
     if t then return math.floor(t / 1000) end
     return 0
 end
--- 真实时间秒（os.clock）。取不到时返回 nil（调用方按"本次不节流"处理）。
+-- Real time in seconds (os.clock). Returns nil if unavailable (caller treats this as "no throttling this time").
 local function _realSeconds()
     local ok, t = pcall(os.clock)
     if ok and type(t) == "number" then return t end
     return nil
 end
 
--- 稳定路径点实体 key。实测（2026-08-05）：v.waypoints[i] 是 SignalId 结构（api.type.SignalId），
--- 暴露数字字段：entity=SignalList 实体号、index=信号列表内序号。
--- 该身份对物理路径点唯一、与线路无关、与改名无关 → _gwNames 严格一实体一名、跨线路全局同步。
--- 注意：路径点不是普通 ECS 实体，getComponent(wpRef, ...) 在其上全部报错（pcall 抓不到值），
--- getEdgeForEdgeObject/MODEL_INSTANCE_LIST 也取不到 —— 只能靠 .entity/.index。
+-- Stable waypoint entity key. Verified (2026-08-05): v.waypoints[i] is a SignalId struct (api.type.SignalId),
+-- exposing numeric fields: entity = SignalList entity id, index = position within the signal list.
+-- This identity is unique per physical waypoint, independent of line and of renaming -> _gwNames is strictly one name per entity, synced globally across lines.
+-- Note: waypoints are not regular ECS entities; getComponent(wpRef, ...) errors on all of them (pcall yields no value),
+-- and getEdgeForEdgeObject/MODEL_INSTANCE_LIST don't work either -- only .entity/.index can be used.
 function timetableHelper.getWaypointEntityKey(wpRef, sgEntity, wpIndex)
     local sigEntity, sigIndex = nil, nil
     pcall(function()
@@ -51,7 +51,7 @@ function timetableHelper.getWaypointEntityKey(wpRef, sgEntity, wpIndex)
     if sigEntity ~= nil then
         return "gws_" .. tostring(sigEntity) .. "_" .. tostring(sigIndex or 0)
     end
-    -- 降级（理论路径点都带 .entity，此为防御）：edge + 世界坐标
+    -- Fallback (in theory all waypoints have .entity, this is defensive): edge + world position
     local edge = nil
     pcall(function()
         edge = api.engine.system.streetSystem.getEdgeForEdgeObject(wpRef)
@@ -72,7 +72,7 @@ function timetableHelper.getWaypointEntityKey(wpRef, sgEntity, wpIndex)
         return "gwp_" .. tostring(edge)
     end
     if px and py then return "gwp_p_" .. px .. "_" .. py end
-    -- 最后兜底：父站+序号（不含名字，改名不失效）。该情况下跨线路身份无法保证，属可接受降级。
+    -- Last resort: parent station + index (no name, so renaming doesn't invalidate it). Cross-line identity is not guaranteed here; acceptable degradation.
     return "gwpk_" .. tostring(sgEntity) .. "_" .. tostring(wpIndex)
 end
 
@@ -229,8 +229,8 @@ end
 
 ---@param vehicle number | string
 -- returns Null
--- 强制车辆立即发车：仅在"等待→放行"瞬间调用，配合 stopVehicle 的
--- setVehicleManualDeparture(true) 实现在到点后真正启动车辆。
+-- Force a vehicle to depart immediately: only called at the moment of "waiting -> released"; together with stopVehicle's
+-- setVehicleManualDeparture(true) this actually starts the vehicle once its time has come.
 function timetableHelper.forceDeparture(vehicle)
     if type(vehicle) == "string" then vehicle = tonumber(vehicle) end
     if not(type(vehicle) == "number") then print("Expected String or Number") return false end
@@ -293,11 +293,11 @@ function timetableHelper.lineHasType(line, lineType)
     if type(line) == "string" then line = tonumber(line) end
     if not(type(line) == "number") then print("Expected String or Number") return -1 end
 
-    -- 优先从 Line 组件的 vehicleInfo.transportModes 判断（不依赖线路已有车辆，新建空线路也可判断）。
-    -- transportModes 是 TransportMode 位字段/数组/userdata: PERSON=0 CARGO=1 CAR=2 BUS=3 TRUCK=4
+    -- Prefer the Line component's vehicleInfo.transportModes (doesn't depend on the line having vehicles; works for new empty lines too).
+    -- transportModes is a TransportMode bit field/array/userdata: PERSON=0 CARGO=1 CAR=2 BUS=3 TRUCK=4
     --   TRAM=5 ELECTRIC_TRAM=6 TRAIN=7 ELECTRIC_TRAIN=8 AIRCRAFT=9 SHIP=10
-    -- 注意：整个字段读取链必须包在 pcall 内——lineObject 是 userdata，若没有 vehicleInfo 字段，
-    -- 直接访问 lineObject.vehicleInfo 会抛 Sol2 错误且可能无法被外层捕获，导致崩溃。
+    -- Note: the whole field access chain must be inside pcall -- lineObject is userdata; if it has no vehicleInfo field,
+    -- accessing lineObject.vehicleInfo directly throws a Sol2 error that may not be caught by the outer handler, causing a crash.
     local okModes, modesFound = pcall(function()
         local okL, lineObject = pcall(function()
             return api.engine.getComponent(line, api.type.ComponentType.LINE)
@@ -323,9 +323,9 @@ function timetableHelper.lineHasType(line, lineType)
             return false
         end
         local modes = modesFound
-        -- transportModes 可能是数组/位掩码数字。
-        -- userdata：不做 #/索引操作（对 userdata 的 # 可能触发 C++ 异常，pcall 无法捕获），
-        -- 直接跳过 transportModes 判断，回退到车辆 carrier 判断（原版可靠方式）。
+        -- transportModes may be an array/bitmask number.
+        -- userdata: no #/indexing (# on userdata may trigger a C++ exception that pcall cannot catch);
+        -- skip the transportModes check and fall back to the vehicle carrier check (the original, reliable way).
         local matched = false
         if type(modes) == "table" then
             for _, m in ipairs(modes) do
@@ -343,7 +343,7 @@ function timetableHelper.lineHasType(line, lineType)
         if matched then return true end
     end
 
-    -- 回退：通过线路已有车辆的 carrier 判断（原版行为）
+    -- Fallback: determine via the carrier of the line's existing vehicles (original behavior)
     local okCarrier, carrierVal = pcall(function()
         local okV, vehicles = pcall(function()
             return api.engine.system.transportVehicleSystem.getLineVehicles(line)
@@ -435,8 +435,8 @@ end
 
 -- returns [{id : number, name : String}]
 function timetableHelper.getAllRailLines()
-    -- 注意：返回所有线路（不过滤）。时刻表需要展示全部线路（公交/铁路/汽车/电车等）。
-    -- 运行图（diagram_gui）需要铁路线时自行用 lineHasType(l,"RAIL") 过滤。
+    -- Note: returns all lines (unfiltered). The timetable needs to show all lines (bus/rail/road/tram etc.).
+    -- The diagram (diagram_gui) filters for rail lines itself via lineHasType(l,"RAIL") when needed.
     local res = {}
     local ls = api.engine.system.lineSystem.getLines()
     for k,l in pairs(ls) do
@@ -578,20 +578,20 @@ function timetableHelper.getStation(station)
 end
 
 
--- 判断 stationEntity 是否为铁路站（有铁轨连接）。
--- 依据1：getStation2edgesMap 返回该站连接的边（EdgeId，TRANSPORT_NETWORK 内索引），
---         通过 TRANSPORT_NETWORK 组件的 edges[index] 拿到 TransportEdge，再检查其 base edge 是否有 BASE_EDGE_TRACK。
--- 依据2：回退检查站组是否有铁路线路停靠。
+-- Determine whether stationEntity is a rail station (has track connections).
+-- Criterion 1: getStation2edgesMap returns the edges connected to the station (EdgeId, index within TRANSPORT_NETWORK);
+--         get the TransportEdge via edges[index] of the TRANSPORT_NETWORK component, then check whether its base edge has BASE_EDGE_TRACK.
+-- Criterion 2: fall back to checking whether rail lines stop at the station group.
 local stationEdgesCache = nil
-local railStationGroupCache = nil -- {[sgEntity]=true} 铁路线停靠的站组
+local railStationGroupCache = nil -- {[sgEntity]=true} station groups served by rail lines
 local function getRailStationGroupCache()
     if railStationGroupCache ~= nil then return railStationGroupCache end
     railStationGroupCache = {}
     pcall(function()
         local ls = api.engine.system.lineSystem.getLines()
         for _, l in pairs(ls) do
-            -- 只收集"明确是铁路"的线路停站（正向判断）：这里宁可漏判（站再由铁轨边判断兜底），
-            -- 不能把公交空线路误收进来导致公交站被误判为铁路站。
+            -- Only collect stops of lines that are "definitely rail" (positive check): better to miss some here (the track edge check is the backup)
+            -- than to include empty bus lines and misclassify bus stops as rail stations.
             if timetableHelper.lineHasType(l, "RAIL") then
                 local okL, lineObject = pcall(function()
                     return api.engine.getComponent(l, api.type.ComponentType.LINE)
@@ -609,7 +609,7 @@ local function getRailStationGroupCache()
     return railStationGroupCache
 end
 
-local nonRailStationGroupCache = nil -- {[sgEntity]=true} 明确非铁路线（公交/电车等）停靠的站组
+local nonRailStationGroupCache = nil -- {[sgEntity]=true} station groups served by definitely non-rail lines (bus/tram etc.)
 local function getNonRailStationGroupCache()
     if nonRailStationGroupCache ~= nil then return nonRailStationGroupCache end
     nonRailStationGroupCache = {}
@@ -640,7 +640,7 @@ end
 function timetableHelper.isRailStation(stationEntity)
     if not (type(stationEntity) == "number") then return false end
 
-    -- 获取 stationGroup
+    -- Get stationGroup
     local okSG0, sgEntity = pcall(function()
         return api.engine.system.stationGroupSystem.getStationGroup(stationEntity)
     end)
@@ -648,17 +648,17 @@ function timetableHelper.isRailStation(stationEntity)
         return false
     end
 
-    -- 0) 站组在任何铁路线停站中 -> 铁路站（最可靠）
+    -- 0) Station group is a stop of any rail line -> rail station (most reliable)
     if getRailStationGroupCache()[sgEntity] then
         return true
     end
 
-    -- 0.5) 站组在非铁路线（公交/电车等）停站中 -> 非铁路站
+    -- 0.5) Station group is a stop of a non-rail line (bus/tram etc.) -> non-rail station
     if getNonRailStationGroupCache()[sgEntity] then
         return false
     end
 
-    -- 1) 检查连接的边是否铁轨（边实体有 BASE_EDGE_TRACK 组件 = 铁轨）
+    -- 1) Check whether connected edges are tracks (edge entity has a BASE_EDGE_TRACK component = track)
     if stationEdgesCache == nil then
         pcall(function()
             stationEdgesCache = api.engine.system.stationSystem.getStation2edgesMap()
@@ -666,7 +666,7 @@ function timetableHelper.isRailStation(stationEntity)
         if stationEdgesCache == nil then stationEdgesCache = false end
     end
     local edges = stationEdgesCache
-    -- 尝试两种 key：stationEntity 与 stationGroup
+    -- Try both keys: stationEntity and stationGroup
     local edgeEntry = nil
     if edges then
         edgeEntry = edges[stationEntity]
@@ -685,7 +685,7 @@ function timetableHelper.isRailStation(stationEntity)
                     end)
                     if okN and tn and tn.edges and tn.edges[idx] then
                         local edge = tn.edges[idx]
-                        -- edge 可能是 TransportEdge（含 base edge 实体引用）或直接是 base edge 实体
+                        -- edge may be a TransportEdge (with a base edge entity reference) or directly a base edge entity
                         local baseEntity = type(edge) == "number" and edge or (edge and (edge.edge or edge.entity or edge.baseEdge))
                         if baseEntity then
                             local okT, trackComp = pcall(function()
@@ -705,10 +705,10 @@ function timetableHelper.isRailStation(stationEntity)
         end
     end
 
-    -- 2) 回退：检查站停靠的线路。用反向过滤（与 getAllRailLines 一致）：
-    --    若有明确非铁路线路（公交/电车/水路/航空）且没有任何铁路线路，则该站为非铁路站。
-    --    无法判断（空线路等）时保守保留为铁路站，避免误删。
-    -- 优先 getLineStopsForStation（station 直接停靠），回退 getLineStops（站组停靠）。
+    -- 2) Fallback: check the lines stopping at the station. Uses reverse filtering (consistent with getAllRailLines):
+    --    if there are definitely non-rail lines (bus/tram/water/air) and no rail lines at all, the station is non-rail.
+    --    If undecidable (empty lines etc.), conservatively keep it as a rail station to avoid wrongly removing it.
+    -- Prefer getLineStopsForStation (lines stopping directly at the station), fall back to getLineStops (station group stops).
     local lineStops = nil
     pcall(function()
         lineStops = api.engine.system.lineSystem.getLineStopsForStation(stationEntity)
@@ -732,7 +732,7 @@ function timetableHelper.isRailStation(stationEntity)
         local hasNonRail = false
         pcall(function()
             for _, entry in pairs(lineStops) do
-                -- 提取线路实体：兼容多种结构 {line,int} / {int,line} / {line=...,stop=...} / line
+                -- Extract the line entity: supports several structures {line,int} / {int,line} / {line=...,stop=...} / line
                 local line = nil
                 local et = type(entry)
                 if et == "number" then
@@ -782,14 +782,14 @@ function timetableHelper.getAllStationEntities()
             if okSG and sgEntity and type(sgEntity) == "number" and sgEntity > 0 then
                 local sgKey = tostring(sgEntity)
                 if not seen[sgKey] then
-                    -- 先判断 isRail 再标记 seen：同一站组可能含多个站台，
-                    -- 若首个站台 isRail 判定失败，后续站台仍有机会判定成功（防止共享站组被误过滤）。
-                    -- 单个站判断包 pcall：内部任何 Lua 错误不中断整个 forEach 遍历。
+                    -- Check isRail before marking as seen: a station group may contain several platforms;
+                    -- if the first platform fails the isRail check, later platforms still get a chance (prevents shared station groups from being filtered out wrongly).
+                    -- Each station check is wrapped in pcall: any Lua error inside doesn't abort the whole forEach traversal.
                     local okRail, isRail = pcall(function()
                         return timetableHelper.isRailStation(stationEntity)
                     end)
                     if not okRail then
-                        isRail = true -- 判断失败时保守保留
+                        isRail = true -- keep conservatively if the check fails
                     end
                     if not isRail then
                         filteredBus = filteredBus + 1
@@ -921,11 +921,11 @@ function timetableHelper.getAllStops(line)
                 elseif type(v.waypoints) == "table" then
                     wpCount = #v.waypoints
                 end
-                -- 逐条验证、遇到无效/越界实体即截断：Line.Stop.waypoints 是 userdata，
-                -- 其 # 可能返回虚高（无路径点的车站概率性多出几个"路径点"即此原因），
-                -- 实体也可能已被删除。越界索引会返回 nil 或抛错（pcall 捕获），以此截断。
-                -- 注意：不能用"是否有 NAME 组件"判断有效——未命名路径点可能没有 NAME 组件，
-                -- 一旦第一个 waypoint 校验失败就 break，会导致路径点全部消失。
+                -- Validate one by one and truncate at the first invalid/out-of-range entity: Line.Stop.waypoints is userdata,
+                -- its # may be inflated (this is why stations without waypoints randomly get a few extra "waypoints"),
+                -- and entities may have been deleted. Out-of-range indices return nil or throw (caught by pcall), which is used to truncate.
+                -- Note: "has a NAME component" cannot be used as the validity check -- unnamed waypoints may have no NAME component,
+                -- and breaking as soon as the first waypoint fails validation would make all waypoints disappear.
                 for i = 1, wpCount do
                     local ok, wpRef = pcall(function() return v.waypoints[i] end)
                     if not (ok and wpRef ~= nil) then break end
@@ -997,7 +997,7 @@ end
 -- returns [Number], an Array where the index it the source element and the number is the target position
 function timetableHelper.getOrderOfArray(arr)
     if not arr then return {} end
-    -- 构建连续数组再排序：arr 可能是稀疏哈希表（key 不连续），直接 table.sort 会遇到 nil 崩溃
+    -- Build a contiguous array before sorting: arr may be a sparse hash table (non-contiguous keys); table.sort on it would crash on nil
     local toSort = {}
     for k, v in pairs(arr) do
         toSort[#toSort + 1] = {key = k, value = v}
@@ -1031,34 +1031,34 @@ function timetableHelper.mergeArray(a,b)
 end
 
 
--- 返回车辆 ID 数组（list）：仅包含"勾选了遵循时刻表（hasTimetable == true）"的线路、
--- 且当前停在站内的车辆（TransportVehicleState.AT_TERMINAL）。
--- 用户定稿：未勾选"遵循时刻表"的线路完全不受 mod 控车——按游戏默认装卸车后正常发车，
--- 也不得干预其它未安排时刻表的线路（含公共汽车/电车/船/飞机）。
--- 注意（三条血泪）：
--- 1) 调用方传入 hasTimetable 过滤函数。此前改为 getVehiclesWithState 时把过滤漏掉了，
---    → 协程对全地图所有站内车辆逐帧 stopVehicle/startVehicle，未勾选线路被误扣车；
--- 2) 返回值必须是"车辆 ID 数组"（值=车辆 ID）。若返回 {车辆ID: 线路ID} 映射表，
---    协程 for _,v in pairs() 取到的是线路 ID，waitingRequired(线路ID) 内
---    getComponent(线路, TRANSPORT_VEHICLE) 触发 C++ assert（GetComponentDataIndex，
---    pcall 抓不住）→ 协程卡死 → 每帧刷 "cannot resume non-suspended coroutine"；
--- 3) getVehiclesWithState 快照可能含刚删除的失效 ID：必须先 entityExists 校验再
---    getComponent（AGENTS.md：getComponent 对无效实体 = C++ assert，pcall 无效）。
+-- Returns an array (list) of vehicle IDs: only vehicles of lines with "follow timetable" ticked (hasTimetable == true)
+-- that are currently stopped at a station (TransportVehicleState.AT_TERMINAL).
+-- Final user decision: lines without "follow timetable" ticked are not controlled by the mod at all -- they load/unload and depart as the game does by default,
+-- and other lines without a timetable (including buses/trams/ships/aircraft) must not be interfered with either.
+-- Note (three hard-learned lessons):
+-- 1) The caller passes a hasTimetable filter function. When this was changed to getVehiclesWithState the filter was lost,
+--    -> the coroutine called stopVehicle/startVehicle every frame on all vehicles at stations on the whole map, holding vehicles of unticked lines;
+-- 2) The return value must be an "array of vehicle IDs" (value = vehicle ID). If it returned a {vehicleID: lineID} map,
+--    the coroutine's for _,v in pairs() would get line IDs, and inside waitingRequired(lineID)
+--    getComponent(line, TRANSPORT_VEHICLE) triggers a C++ assert (GetComponentDataIndex,
+--    not catchable by pcall) -> coroutine hangs -> "cannot resume non-suspended coroutine" spammed every frame;
+-- 3) The getVehiclesWithState snapshot may contain just-deleted, invalid IDs: must check entityExists before
+--    getComponent (AGENTS.md: getComponent on an invalid entity = C++ assert, pcall doesn't help).
 --
--- ===== 性能优化 A 组（2026-08-16 第 21 轮）：本函数有两个口径 =====
---   · scanByComponent（原口径，保留作**回退**与**自检基准**）：全世界停站车辆 → 逐辆
---     entityExists + getComponent(TRANSPORT_VEHICLE) 取线路 → hasTimetable 过滤。
---     开销 = 1 + 2×F 次引擎调用（F = 全世界停站车辆数），每次还各带一个闭包。
---   · scanByLineIndex（本版本默认）：先取"勾选了遵循时刻表的线路"的车辆集合
---     （每线一次 getLineVehicles，勾选线路通常个位数），再与全世界停站车辆集合求交
---     → **逐辆引擎调用降为 0**（只对命中的车做一次 entityExists 保护）。
---   自检（每 60s 一次）：两个口径的结果集合必须完全一致；一旦不一致 → 永久退回原口径
---   并打印一次提示（宁可慢也不改变控车行为）。这样即使某版本引擎的车辆 ID 类型/线路
---   归属与假设不符，也不会出现"该控的车不控了"。
-local scanFastPathOk = true      -- 反查口径是否可用（自检失败 → false）
-local scanNextCheckAt = nil      -- 下次自检的真实时间秒（os.clock）
+-- ===== Performance optimization group A (2026-08-16, round 21): this function has two methods =====
+--   - scanByComponent (original method, kept as **fallback** and **self-check baseline**): all vehicles at stations worldwide -> per vehicle
+--     entityExists + getComponent(TRANSPORT_VEHICLE) to get the line -> hasTimetable filter.
+--     Cost = 1 + 2xF engine calls (F = number of vehicles at stations worldwide), each with its own closure.
+--   - scanByLineIndex (default in this version): first get the vehicles of lines with "follow timetable" ticked
+--     (one getLineVehicles per line; usually only a handful of ticked lines), then intersect with all vehicles at stations
+--     -> **per-vehicle engine calls drop to 0** (only one entityExists guard for each matching vehicle).
+--   Self-check (every 60s): both methods must yield exactly the same set; on any mismatch -> permanently fall back to the original method
+--   and print a notice once (better slow than changing vehicle control behavior). That way, even if some engine version's vehicle ID types/line
+--   ownership don't match the assumptions, we never end up "not controlling vehicles that should be controlled".
+local scanFastPathOk = true      -- whether the reverse lookup method is usable (self-check failed -> false)
+local scanNextCheckAt = nil      -- real time in seconds (os.clock) of the next self-check
 
--- 原口径（稳妥回退 / 自检基准）
+-- Original method (safe fallback / self-check baseline)
 local function scanByComponent(hasTimetable)
     local res = {}
     local okS, vehicles = pcall(_vehiclesWithState, api.type.enum.TransportVehicleState.AT_TERMINAL)
@@ -1075,7 +1075,7 @@ local function scanByComponent(hasTimetable)
     return res
 end
 
--- 反查口径（勾选线路的车辆 ∩ 停站车辆）
+-- Reverse lookup method (vehicles of ticked lines ∩ vehicles at stations)
 local function scanByLineIndex(tickedLines)
     local res = {}
     if type(tickedLines) ~= "table" then return res end
@@ -1085,7 +1085,7 @@ local function scanByLineIndex(tickedLines)
         local okL, vehs = pcall(_lineVehicles, line)
         if okL and vehs then
             for _, v in pairs(vehs) do
-                -- 同时登记原值与字符串两种键：两套引擎接口的 ID 类型若不统一也能命中
+                -- Register both the raw value and its string as keys: matches even if the two engine APIs use different ID types
                 allowed[v] = true
                 allowed[tostring(v)] = true
                 any = true
@@ -1104,7 +1104,7 @@ local function scanByLineIndex(tickedLines)
     return res
 end
 
--- 两套口径结果是否等价（按字符串键比较集合）
+-- Whether the results of both methods are equivalent (set comparison by string keys)
 local function sameVehicleSet(a, b)
     if #a ~= #b then return false end
     local seen = {}
@@ -1115,14 +1115,14 @@ local function sameVehicleSet(a, b)
     return true
 end
 
----@param hasTimetable function 线路是否"遵循时刻表"的判定函数
----@param tickedLines table|nil 勾选线路的 ID 数组（调用方从 timetableObject 纯 Lua 取；给了才走反查口径）
+---@param hasTimetable function whether a line "follows the timetable" (predicate)
+---@param tickedLines table|nil array of ticked line IDs (caller reads it as plain Lua from timetableObject; the reverse lookup method is only used if given)
 function timetableHelper.getAllTimetableRailVehicles(hasTimetable, tickedLines)
     if not (scanFastPathOk and tickedLines) then
         return scanByComponent(hasTimetable)
     end
     local res = scanByLineIndex(tickedLines)
-    -- 周期性自检：真实时间每 60s 比对一次两套口径（各一次全量扫描，开销可忽略）
+    -- Periodic self-check: compare both methods every 60s of real time (one full scan each, negligible cost)
     local now = _realSeconds()
     if now and (scanNextCheckAt == nil or now >= scanNextCheckAt) then
         scanNextCheckAt = now + 60
@@ -1225,16 +1225,16 @@ function timetableHelper.constraintStringToInt(i)
 
 end
 
--- Liang-Barsky 线段矩形裁剪（纯函数，可单测）。运行图放大（2026-08-16 功能）用：
--- 折线各段先按小时切段（drawWrappedSegment），再按可视时间窗口/站区窗口裁剪。
--- 输入：线段端点 (x1,y1)-(x2,y2)，矩形 [xMin,xMax]×[yMin,yMax]。
--- 线段完全在矩形外 → 返回 nil；否则返回裁剪后的 (cx1, cy1, cx2, cy2)。
+-- Liang-Barsky segment/rectangle clipping (pure function, unit-testable). Used by diagram zoom (2026-08-16 feature):
+-- polyline segments are first split per hour (drawWrappedSegment), then clipped to the visible time window/station window.
+-- Input: segment endpoints (x1,y1)-(x2,y2), rectangle [xMin,xMax]x[yMin,yMax].
+-- Segment fully outside the rectangle -> returns nil; otherwise returns the clipped (cx1, cy1, cx2, cy2).
 function timetableHelper.clipSegmentToRect(x1, y1, x2, y2, xMin, xMax, yMin, yMax)
     local dx, dy = x2 - x1, y2 - y1
     local t0, t1 = 0, 1
     local function clipAxis(p, q)
         if p == 0 then
-            -- 平行于该轴：q < 0 表示整段在矩形外侧 → 丢弃
+            -- Parallel to this axis: q < 0 means the whole segment is outside -> discard
             return q >= 0
         end
         local r = q / p
