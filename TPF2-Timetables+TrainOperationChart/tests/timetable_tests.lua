@@ -1152,6 +1152,86 @@ timetableTests[#timetableTests + 1] = function()
     print("  OK: per-vehicle delay carried between stops")
 end
 
+-- Slot claims: two bunched vehicles do not run on the same slot. Slots every 10 min (x0/x1),
+-- tolerance 5 min.
+timetableTests[#timetableTests + 1] = function()
+    local h = 3600 * 13
+    local mockTime, mockArrival = h, h
+    package.loaded["celmi/timetables/timetable_helper"] = {
+        getTime = function() return mockTime end,
+        getCurrentLine = function() return 100 end,
+        getCurrentStation = function() return 1 end,
+        getTimeUntilDeparture = function() return 3 end,
+        getStationID = function() return 1001 end,
+        forceDeparture = function() end,
+    }
+    local prevApi = _G.api
+    _G.api = {
+        engine = {
+            entityExists = function() return true end,
+            getComponent = function(id, ctype)
+                if ctype == 70 then return { doorsTime = mockArrival * 1000000 } end
+                return nil
+            end,
+        },
+        type = { ComponentType = { LINE = 60, TRANSPORT_VEHICLE = 70 } },
+    }
+    package.loaded[".res.scripts.celmi.timetables.timetable"] = nil
+    local tt = require ".res.scripts.celmi.timetables.timetable"
+    tt.setDelayTolerance(300)
+    local slots = {}
+    for m = 0, 50, 10 do slots[#slots + 1] = { m, 0, m + 1, 0 } end
+    tt.setTimetableObject({ ["100"] = { hasTimetable = true, stations = {
+        [1] = { conditions = { type = "ArrDep", ArrDep = slots } } } } })
+    local function waiting(v) return tt.getCurrentlyWaiting()["100"].stations[1].currentlyWaiting[v] end
+
+    -- V1 runs on 00/01.
+    tt.setCurrentlyWaiting({})
+    mockArrival, mockTime = h, h
+    assert(tt.waitingRequired("V1") == true, "V1 early for 00/01")
+    mockTime = h + 60
+    assert(tt.waitingRequired("V1") == false, "V1 released at 01:00")
+
+    -- V2 follows 30 s behind: 00/01 is taken, so it waits for 11:00 instead of leaving late.
+    mockArrival, mockTime = h + 90, h + 90
+    assert(tt.waitingRequired("V2") == true, "V2 must not take V1's slot")
+    assert(waiting("V2").dep == h + 660, "V2 held for 11:00")
+    -- Also with a delay carried from the previous stop on the same slot.
+    tt.getCurrentlyWaiting()["100"].stations[1].currentlyWaiting["V2"] = nil
+    tt.getCurrentlyWaiting()["100"].vehicleDelay["V2"] = { delay = 30, inDelay = 0, time = h }
+    assert(tt.waitingRequired("V2") == true, "V2 with carried delay must not take V1's slot")
+    assert(waiting("V2").dep == h + 660, "V2 held for 11:00")
+    mockTime = h + 660
+    assert(tt.waitingRequired("V2") == false, "V2 released at 11:00")
+    assert(tt.getCurrentlyWaiting()["100"].vehicleDelay["V2"].delay == 0, "V2 on time on its new slot")
+
+    -- Both in the station at once: V3 held for 21:00, V4 arriving next goes to 31:00.
+    mockArrival, mockTime = h + 1200, h + 1200
+    assert(tt.waitingRequired("V3") == true, "V3 early for 20/21")
+    mockArrival, mockTime = h + 1220, h + 1220
+    assert(tt.waitingRequired("V4") == true, "V4 waits")
+    assert(waiting("V4").dep == h + 1860, "V4 held for 31:00, not V3's 21:00")
+
+    -- A claim on a future slot by a vehicle that is no longer held (e.g. sold) is ignored.
+    tt.setCurrentlyWaiting({ ["100"] = { stations = { [1] = { currentlyWaiting = {}, outboundTime = {},
+        slotClaims = { [tostring(h + 2460)] = "V9" } } } } })
+    mockArrival, mockTime = h + 2400, h + 2400
+    assert(tt.waitingRequired("V5") == true, "V5 early for 40/41")
+    assert(waiting("V5").dep == h + 2460, "stale claim ignored")
+
+    -- Late beyond tolerance: moved to the next free slot and runs on it.
+    tt.setCurrentlyWaiting({})
+    mockArrival, mockTime = h + 1200, h + 1200
+    assert(tt.waitingRequired("V6") == true, "V6 holds 20/21")
+    mockArrival, mockTime = h + 420, h + 420
+    assert(tt.waitingRequired("V7") == true, "V7 6 min late for 00/01 is held")
+    assert(waiting("V7").dep == h + 660, "V7 held for 11:00 (free)")
+    assert(waiting("V7").slot == h + 660, "V7 now runs on 10/11")
+
+    _G.api = prevApi
+    print("  OK: slot claims spread bunched vehicles")
+end
+
 return {
     test = function()
         for k,v in pairs(timetableTests) do
