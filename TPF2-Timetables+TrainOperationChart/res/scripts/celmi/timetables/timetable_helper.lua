@@ -105,14 +105,10 @@ end
 --         indext by StopIndes : string
 function timetableHelper.getTrainLocations(line)
     local res = {}
-    local ok, vehicles = pcall(function()
-        return api.engine.system.transportVehicleSystem.getLineVehicles(line)
-    end)
+    local ok, vehicles = pcall(_lineVehicles, line)
     if not ok or not vehicles then return res end
     for _,v in pairs(vehicles) do
-        local okV, vehicle = pcall(function()
-            return api.engine.getComponent(v, api.type.ComponentType.TRANSPORT_VEHICLE)
-        end)
+        local okV, vehicle = pcall(_getComponent, v, api.type.ComponentType.TRANSPORT_VEHICLE)
         if not okV or not vehicle then goto continueA end
         local atTerminal = vehicle.state == 2
         if res[tostring(vehicle.stopIndex)] then
@@ -204,6 +200,30 @@ function timetableHelper.stopVehicle(vehicle)
     if not(type(vehicle) == "number") then print("Expected String or Number") return false end
 
     pcall(_sendManualDeparture, vehicle, true)
+    return nil
+end
+
+---@param vehicle number | string
+---@param held boolean
+-- Holds (like stopVehicle) or releases (like startVehicle) a vehicle, but only sends the
+-- commands that change its current state. Called for every stopped vehicle on every frame,
+-- where re-sending unchanged commands is costly. Falls back to sending them if the vehicle
+-- component can't be read.
+function timetableHelper.setVehicleHeld(vehicle, held)
+    if type(vehicle) == "string" then vehicle = tonumber(vehicle) end
+    if not(type(vehicle) == "number") then print("Expected String or Number") return false end
+
+    local ok, vc = pcall(_getComponent, vehicle, api.type.ComponentType.TRANSPORT_VEHICLE)
+    if not ok or not vc then
+        if held then return timetableHelper.stopVehicle(vehicle) end
+        return timetableHelper.startVehicle(vehicle)
+    end
+    if held then
+        if vc.autoDeparture ~= false then pcall(_sendManualDeparture, vehicle, true) end
+    else
+        if vc.userStopped ~= false then pcall(_sendUserStopped, vehicle, false) end
+        if vc.autoDeparture ~= true then pcall(_sendManualDeparture, vehicle, false) end
+    end
     return nil
 end
 

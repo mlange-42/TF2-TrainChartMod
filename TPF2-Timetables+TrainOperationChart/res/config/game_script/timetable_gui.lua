@@ -956,6 +956,17 @@ function timetableGUI.refreshStationHeaderRow(lineID)
     pcall(function() UIState.boxlayout2:addItem(headerRow, 0.5, 0) end)
 end
 
+-- Image of the line strip at a station, for its entry from timetableHelper.getTrainLocations.
+local function trainLocationImage(pos)
+    if not pos then return "ui/timetable_line.tga" end
+    if pos.atTerminal then
+        if pos.countStr == "MANY" then return "ui/timetable_line_train_in_station_many.tga" end
+        return "ui/timetable_line_train_in_station.tga"
+    end
+    if pos.countStr == "MANY" then return "ui/timetable_line_train_en_route_many.tga" end
+    return "ui/timetable_line_train_en_route.tga"
+end
+
 -- params
 -- index: index of currently selected line
 -- bool: emit select signal when building table
@@ -1011,49 +1022,18 @@ function timetableGUI.fillStationTable(index, bool)
         end
     end
 
+    -- Train position icons: vehicle positions are read once here, and refreshed by a single
+    -- step handler for all stations (not one handler per station, each reading all vehicles
+    -- of the line every frame).
+    local vehiclePositions = timetableHelper.getTrainLocations(lineID)
+    local stationImages = {}
+
     for flatIdx, stopInfo in ipairs(menu.allStops) do
         if stopInfo.type == "station" then
-            local origIdx = stopInfo.stopIndex
-            local vehiclePositions = timetableHelper.getTrainLocations(lineID)
-            if vehiclePositions[tostring(origIdx-1)] then
-                if vehiclePositions[tostring(origIdx-1)].atTerminal then
-                    if vehiclePositions[tostring(origIdx-1)].countStr == "MANY" then
-                        menu.lineImage[flatIdx] = api.gui.comp.ImageView.new("ui/timetable_line_train_in_station_many.tga")
-                    else
-                        menu.lineImage[flatIdx] = api.gui.comp.ImageView.new("ui/timetable_line_train_in_station.tga")
-                    end
-                else
-                    if vehiclePositions[tostring(origIdx-1)].countStr == "MANY" then
-                        menu.lineImage[flatIdx] = api.gui.comp.ImageView.new("ui/timetable_line_train_en_route_many.tga")
-                    else
-                        menu.lineImage[flatIdx] = api.gui.comp.ImageView.new("ui/timetable_line_train_en_route.tga")
-                    end
-                end
-            else
-                menu.lineImage[flatIdx] = api.gui.comp.ImageView.new("ui/timetable_line.tga")
-            end
-            local x = menu.lineImage[flatIdx]
-            menu.lineImage[flatIdx]:onStep(function()
-                if not x then print("ERRROR") return end
-                local vp2 = timetableHelper.getTrainLocations(lineID)
-                if vp2[tostring(origIdx-1)] then
-                    if vp2[tostring(origIdx-1)].atTerminal then
-                        if vp2[tostring(origIdx-1)].countStr == "MANY" then
-                            x:setImage("ui/timetable_line_train_in_station_many.tga", false)
-                        else
-                            x:setImage("ui/timetable_line_train_in_station.tga", false)
-                        end
-                    else
-                        if vp2[tostring(origIdx-1)].countStr == "MANY" then
-                            x:setImage("ui/timetable_line_train_en_route_many.tga", false)
-                        else
-                            x:setImage("ui/timetable_line_train_en_route.tga", false)
-                        end
-                    end
-                else
-                    x:setImage("ui/timetable_line.tga", false)
-                end
-            end)
+            local key = tostring(stopInfo.stopIndex - 1)
+            local img = trainLocationImage(vehiclePositions[key])
+            menu.lineImage[flatIdx] = api.gui.comp.ImageView.new(img)
+            stationImages[#stationImages + 1] = {view = menu.lineImage[flatIdx], key = key, img = img}
         else
             menu.lineImage[flatIdx] = api.gui.comp.ImageView.new("ui/timetable_line.tga")
         end
@@ -1114,6 +1094,27 @@ function timetableGUI.fillStationTable(index, bool)
         conditionString:setMaximumSize(api.gui.util.Size.new(285,50))
 
         menu.stationTable:addRow({stopIndicator, stationNameTable, menu.lineImage[flatIdx], conditionString})
+    end
+
+    -- Refresh the icons when the game second changes, at most twice per real second
+    -- (fast game speeds do not refresh more often); images are only set when they change.
+    if stationImages[1] then
+        local lastGameTime, lastReal = nil, nil
+        stationImages[1].view:onStep(function()
+            local t = timetableHelper.getTime()
+            if t == lastGameTime then return end
+            local real = realTimeNow()
+            if lastReal and real - lastReal < 0.5 then return end
+            lastGameTime, lastReal = t, real
+            local vp = timetableHelper.getTrainLocations(lineID)
+            for _, si in ipairs(stationImages) do
+                local img = trainLocationImage(vp[si.key])
+                if img ~= si.img then
+                    si.img = img
+                    si.view:setImage(img, false)
+                end
+            end
+        end)
     end
 
     menu.stationTable:onSelect(function (tableIndex)
@@ -1846,10 +1847,15 @@ end
 --    同一帧内已经扫过就直接 `yield("idle")`，update() 收到 "idle" 立即结束本帧的 resume 循环
 --    → **扫描频率仍是"每帧一次"**（与车辆到站响应速度完全一致），只是不再重复 21 遍。
 -- 3) 只做一次 getTimetableObject()（引擎线程副本），供清单与扫描共用。
+-- 4) A vehicle held during the current game second is not re-evaluated until the second
+--    changes: waitingRequired works in whole seconds, so the decision can't change before.
+--    Hold/release commands are only sent when they change the vehicle's state (setVehicleHeld).
 local EMPTY_VEHICLE_LIST = {}
 function timetableGUI.timetableCoroutine()
     local scannedFrame = -1        -- 本协程最近一次全量扫描所在的帧号
     local tickedLines = {}         -- 勾选"遵循时刻表"的线路 ID（>0）
+    local heldSecond = nil         -- game second of heldThisSecond
+    local heldThisSecond = {}      -- vehicles held during heldSecond (key: vehicle string)
     while true do
         local list = nil
         if scannedFrame == _G._ttCoFrame then
@@ -1880,11 +1886,18 @@ function timetableGUI.timetableCoroutine()
             for _,vehicle in pairs(list) do
                 local vehicleStr = tostring(vehicle)
                 local skip = false
+                local now = timetableHelper.getTime()
+                if now ~= heldSecond then
+                    heldSecond = now
+                    heldThisSecond = {}
+                elseif heldThisSecond[vehicleStr] then
+                    skip = true
+                end
                 -- 交路系统（TrainRoute mod）钩子：热备车由交路系统强制停车管理（setUserStopped(true) 常停），
                 -- 不走时刻表逻辑；换乘站真车由交路系统按"下一线路发车时刻"单独扣车/换线。
                 -- 未安装 TrainRoute → 钩子 nil → 不跳过任何车（保持原行为）。
                 local trHooks = _G._trainRouteHooks
-                if trHooks then
+                if trHooks and not skip then
                     local okSB, isSb = pcall(trHooks.isStandby, vehicleStr)
                     if okSB and isSb then skip = true end
                     if not skip then
@@ -1895,12 +1908,10 @@ function timetableGUI.timetableCoroutine()
                 if not skip then
                     -- 扣车/放行判定。放行时的 forceDeparture（setVehicleShouldDepart 真启动）
                     -- 已由 waitingRequired 内部无条件处理（含"已过发车时刻、晚点在容差内、
-                    -- 车首次到站从未被扣"的场景）；这里只需 stopVehicle / startVehicle。
-                    if timetable.waitingRequired(vehicleStr) then
-                        timetableHelper.stopVehicle(vehicleStr)
-                    else
-                        timetableHelper.startVehicle(vehicleStr)
-                    end
+                    -- 车首次到站从未被扣"的场景）；这里只需 setVehicleHeld。
+                    local held = timetable.waitingRequired(vehicleStr)
+                    timetableHelper.setVehicleHeld(vehicleStr, held)
+                    if held then heldThisSecond[vehicleStr] = true end
                 end
                 coroutine.yield()
             end
