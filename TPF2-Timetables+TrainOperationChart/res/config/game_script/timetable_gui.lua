@@ -2,6 +2,10 @@ local timetable = require "celmi/timetables/timetable"
 local timetableHelper = require "celmi/timetables/timetable_helper"
 local diagramGUI = require "celmi/timetables/diagram_gui"
 
+-- 交路系统已独立为 TrainRoute mod（res/scripts/trainroute）。本 mod 不再 require 它，
+-- 而是读取 TrainRoute 注册的 _G._trainRouteHooks（引擎线程）/ _G._trainRouteDiagramHook（GUI 线程）：
+-- 未安装 TrainRoute → 钩子为 nil → 行为与无交路系统时完全一致。
+
 local gui = require "gui"
 
 local clockstate = nil
@@ -21,7 +25,42 @@ local state = nil
 
 local timetableChanged = false
 local clearConstraintWindowLaterHACK = nil
-local stationSummaryRefreshDue = nil  -- 中间站表摘要延迟刷新的游戏时间（秒）
+local stationSummaryRefreshDue = nil  -- 中间站表摘要延迟刷新的真实时间（os.clock 秒，暂停时也走）
+
+-- 真实时间钟（os.clock，CPU 秒，单调递增）：游戏暂停（getTime 冻结）时 debounce 也能触发，
+-- 用于"输入完自动刷新中间站表"，不依赖游戏世界时间推进。
+local function realTimeNow()
+    local ok, t = pcall(os.clock)
+    if ok and t then return t end
+    return 0
+end
+
+-- ===== 性能优化 A 组（2026-08-16 第 21 轮）：热路径 pcall 目标提到模块级 =====
+-- 每秒的准点扫描 / 槽位镜像会对"每条线路 × 每辆车"各调若干次 pcall(function() … end)，
+-- 每次执行都新建闭包 → 每秒上万次分配 → Lua GC 周期变短 → 玩家可感的周期性掉帧。
+-- 改成 pcall(fn, args…) 复用模块级函数：错误保护语义不变，只去掉垃圾。
+-- （函数体只在调用时访问 api —— 模块顶层不碰 api，遵守 AGENTS 铁律。）
+local function _entityExists(id) return api.engine.entityExists(id) end
+local function _getComponent(id, ctype) return api.engine.getComponent(id, ctype) end
+local function _lineVehicleMap() return api.engine.system.transportVehicleSystem.getLine2VehicleMap() end
+local function _slotMode(lineID) return timetable.getLineSlotMode(lineID) end
+local function _vehCountCfg(lineID) return timetable.getLineVehicleCount(lineID) end
+-- 真实时间秒；取不到返回 nil（保留"时钟不可用则本次不执行"的原语义）
+local function rawRealSeconds()
+    local ok, t = pcall(os.clock)
+    if ok and type(t) == "number" then return t end
+    return nil
+end
+
+-- 组件名计数器：ScrollArea 等组件名必须跨刷新周期唯一（AGENTS.md：removeItem 移除的
+-- 组件名可能未被引擎即时释放，下次创建同名组件会冲突/addItem 静默失败，进而后续访问 nil）。
+-- 窗口被运行图 Window.new() 销毁后重建时刻表时，若用固定名（"timetable.LineOverview" 等）
+-- 会与残留旧名冲突 → 崩溃（attempt to index a nil value）。存 _G 抗 Lua VM 重载。
+local function nextScrollName()
+    if not _G._ttScrollNameCounter then _G._ttScrollNameCounter = 0 end
+    _G._ttScrollNameCounter = _G._ttScrollNameCounter + 1
+    return _G._ttScrollNameCounter
+end
 
 local stationTableScrollOffset
 local lineTableScrollOffset
@@ -62,6 +101,19 @@ local UIStrings = {
 		settings = _("diagram_settings_i18n"),
 		delay_tol = _("diagram_delay_tol_i18n"),
 		delay_none = _("diagram_delay_none_i18n"),
+		data_sync = _("diagram_data_sync_i18n"),
+		data_sync_desc = _("diagram_data_sync_desc_i18n"),
+		data_sync_result = _("diagram_data_sync_result_i18n"),
+		data_sync_none = _("diagram_data_sync_none_i18n"),
+		data_sync_line = _("diagram_data_sync_line_i18n"),
+		data_sync_station = _("diagram_data_sync_station_i18n"),
+		confirm = _("diagram_confirm_i18n"),
+		separation = _("diagram_separation_i18n"),
+		generate = _("diagram_generate_i18n"),
+		force_departure = _("diagram_force_departure_i18n"),
+		min_wait = _("diagram_min_wait_i18n"),
+		max_wait = _("diagram_max_wait_i18n"),
+		help = _("diagram_help_i18n"),
 	}
 
 local local_styles = {
@@ -70,6 +122,64 @@ local local_styles = {
     ja = "timetable-mono-ja",
     kr = "timetable-mono-kr"
 }
+
+-- 数据同步结果弹窗：按线路分组列出"哪些站、每站新增几套到发时刻"。
+-- report = { lines = { [lineKey] = { [stationNumber] = 新增套数 } }, totalSlots = N }
+local function showSyncResultWindow(report)
+    local bodyText
+    if report and report.totalSlots and report.totalSlots > 0 and report.lines then
+        local lineList = {}
+        for lineKey, stations in pairs(report.lines) do
+            lineList[#lineList + 1] = { key = lineKey, stations = stations }
+        end
+        table.sort(lineList, function(a, b)
+            return (tonumber(a.key) or 0) < (tonumber(b.key) or 0)
+        end)
+        local parts = {}
+        for _, le in ipairs(lineList) do
+            local lineName = timetableHelper.getLineName(le.key)
+            if not lineName or lineName == "ERROR" then lineName = le.key end
+            local snList = {}
+            for sn, cnt in pairs(le.stations) do
+                snList[#snList + 1] = { sn = sn, cnt = cnt }
+            end
+            table.sort(snList, function(a, b) return a.sn < b.sn end)
+            local stationParts = {}
+            for _, se in ipairs(snList) do
+                stationParts[#stationParts + 1] = string.format(UIStrings.data_sync_station, se.sn, se.cnt)
+            end
+            parts[#parts + 1] = string.format(UIStrings.data_sync_line, lineName) .. table.concat(stationParts, "、")
+        end
+        bodyText = table.concat(parts, "\n")
+    else
+        bodyText = UIStrings.data_sync_none
+    end
+
+    local cc = api.gui.comp.Component.new("dataSyncResultContent")
+    local cl = api.gui.layout.BoxLayout.new("VERTICAL")
+    cc:setLayout(cl)
+    local body = api.gui.comp.TextView.new(bodyText)
+    body:setStyleClassList({"timetable-mono-sc"})
+    local scroll = api.gui.comp.ScrollArea.new(body, "timetable.dataSyncResultScroll_" .. nextScrollName())
+    scroll:setMinimumSize(api.gui.util.Size.new(420, 200))
+    scroll:setMaximumSize(api.gui.util.Size.new(420, 260))
+    cl:addItem(scroll)
+
+    local blc = api.gui.comp.Component.new("dataSyncResultBtns")
+    local bll = api.gui.layout.BoxLayout.new("HORIZONTAL")
+    blc:setLayout(bll)
+    local okBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(UIStrings.confirm), true)
+    bll:addItem(okBtn)
+    cl:addItem(blc)
+
+    local okW, win = pcall(function() return api.gui.comp.Window.new(UIStrings.data_sync_result, cc) end)
+    if not okW or not win then return end
+    win:addHideOnCloseHandler()
+    win:setMovable(true)
+    win:setSize(api.gui.util.Size.new(440, 310))
+    win:setPosition(400, 300)
+    okBtn:onClick(function() pcall(function() win:setVisible(false, false) end) end)
+end
 -------------------------------------------------------------
 ---------------------- stationTab ---------------------------
 -------------------------------------------------------------
@@ -84,7 +194,7 @@ function timetableGUI.initStationTab()
 
     --left table
     local stationOverview = api.gui.comp.TextView.new('StationOverview')
-    menu.stationTabScrollArea = api.gui.comp.ScrollArea.new(stationOverview, "timetable.stationTabStationOverviewScrollArea")
+    menu.stationTabScrollArea = api.gui.comp.ScrollArea.new(stationOverview, "timetable.stationTabStationOverviewScrollArea_" .. nextScrollName())
     menu.stationTabStationTable = api.gui.comp.Table.new(1, 'SINGLE')
     menu.stationTabScrollArea:setMinimumSize(api.gui.util.Size.new(300, 700))
     menu.stationTabScrollArea:setMaximumSize(api.gui.util.Size.new(300, 700))
@@ -92,7 +202,7 @@ function timetableGUI.initStationTab()
     timetableGUI.fillStationTabStationTable()
     if UIState.floatingLayoutStationTab then UIState.floatingLayoutStationTab:addItem(menu.stationTabScrollArea,0,0) end
 
-    menu.stationTabLinesScrollArea = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new('LineOverview'), "timetable.stationTabLinesScrollArea")
+    menu.stationTabLinesScrollArea = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new('LineOverview'), "timetable.stationTabLinesScrollArea_" .. nextScrollName())
     menu.stationTabLinesTable = api.gui.comp.Table.new(3, 'NONE')
     menu.stationTabLinesScrollArea:setMinimumSize(api.gui.util.Size.new(799, 700))
     menu.stationTabLinesScrollArea:setMaximumSize(api.gui.util.Size.new(799, 700))
@@ -159,7 +269,14 @@ function timetableGUI.fillStationTabLineTable(stationID)
 
     local lineNames2 ={}
     for k,v in  pairs(constraints) do
+        -- 孤儿线路（已被玩家删除）三重拦截：
+        -- 1) lineExists 用 lineSystem.getLines() 当前线路集合判断（最可靠，删除的线路绝不在其中）；
+        -- 2) getLineName 返回 "ERROR" 兜底（覆盖 getLines 调用失败的极端情况）。
+        -- 注意：对已删除线路调 getComponent 可能触发 C++ assert（AGENTS.md），
+        -- 故先用 lineExists 拦截再调 getLineName，避免走到 getComponent。
+        if not timetable.lineExists(k) then goto continueStationLine end
         local lineName = timetableHelper.getLineName(k)
+        if lineName == "ERROR" then goto continueStationLine end
         lineNames2[#lineNames2 + 1] = lineName
 
         local lineColour2 = api.gui.comp.LineRenderView.new()
@@ -177,6 +294,7 @@ function timetableGUI.fillStationTabLineTable(stationID)
         stConditionString:setName("conditionString")
         stConditionString:setStyleClassList(local_style)
         menu.stationTabLinesTable:addRow({lineColour2, api.gui.comp.TextView.new(lineName), stConditionString})
+        ::continueStationLine::
     end
     local order = timetableHelper.getOrderOfArray(lineNames2)
     menu.stationTabLinesTable:setOrder(order)
@@ -196,7 +314,11 @@ function timetableGUI.fillWaypointTabLineTable(gwKey)
 
     local lineNames = {}
     for lineStr, data in pairs(wp.lines) do
+        -- 孤儿线路（已被玩家删除）双重拦截：先用 getLines 集合判断（可靠），
+        -- 再以 getLineName 返回 "ERROR" 兜底。
+        if not timetable.lineExists(lineStr) then goto continueWaypointLine end
         local lineName = timetableHelper.getLineName(lineStr)
+        if lineName == "ERROR" then goto continueWaypointLine end
         table.insert(lineNames, lineName)
 
         local lineColour = api.gui.comp.LineRenderView.new()
@@ -219,6 +341,7 @@ function timetableGUI.fillWaypointTabLineTable(gwKey)
         timeText:setStyleClassList(local_style)
 
         menu.stationTabLinesTable:addRow({lineColour, api.gui.comp.TextView.new(lineName), timeText})
+        ::continueWaypointLine::
     end
 
     local order = timetableHelper.getOrderOfArray(lineNames)
@@ -242,7 +365,7 @@ function timetableGUI.initLineTable()
         lineTableScrollOffset = api.type.Vec2i.new()
     end
 
-    menu.scrollArea = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new('LineOverview'), "timetable.LineOverview")
+    menu.scrollArea = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new('LineOverview'), "timetable.LineOverview_" .. nextScrollName())
     menu.lineTable = api.gui.comp.Table.new(3, 'SINGLE')
     menu.lineTable:setColWidth(0,28)
 
@@ -265,6 +388,12 @@ end
 
 function timetableGUI.initStationTable()
     -- removeItem 前确保组件属于当前布局：重开路径（showLineMenu）已重置引用为 nil。
+    -- 线路控车开关行（stationHeaderRow）先于滚动区移除（每次 init 重建，防堆积）。
+    if menu.stationHeaderRow then
+        pcall(function() UIState.boxlayout2:removeItem(menu.stationHeaderRow) end)
+        menu.stationHeaderRow = nil
+        menu.stationHeaderRowLineID = nil
+    end
     if menu.stationScrollArea then
         pcall(function()
             local tmp = menu.stationScrollArea:getScrollOffset()
@@ -275,14 +404,16 @@ function timetableGUI.initStationTable()
         stationTableScrollOffset = api.type.Vec2i.new()
     end
 
-    menu.stationScrollArea = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new('stationScrollArea'), "timetable.stationScrollArea")
+    menu.stationScrollArea = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new('stationScrollArea'), "timetable.stationScrollArea_" .. nextScrollName())
     menu.stationTable = api.gui.comp.Table.new(4, 'SINGLE')
     menu.stationTable:setColWidth(0,40)
     menu.stationTable:setColWidth(1,120)
-    menu.stationScrollArea:setMinimumSize(api.gui.util.Size.new(500, 700))
-    menu.stationScrollArea:setMaximumSize(api.gui.util.Size.new(500, 700))
+    -- 高度 670：顶部让出 34px 给"线路控车开关行"（refreshStationHeaderRow 置于 (0.5,0)），
+    -- 滚动区放 (0.5,1)——与左栏"排序行在上/列表在下"同款 FloatingLayout 锚点布局；总高保持 ~700。
+    menu.stationScrollArea:setMinimumSize(api.gui.util.Size.new(500, 670))
+    menu.stationScrollArea:setMaximumSize(api.gui.util.Size.new(500, 670))
     menu.stationScrollArea:setContent(menu.stationTable)
-    UIState.boxlayout2:addItem(menu.stationScrollArea,0.5,0)
+    UIState.boxlayout2:addItem(menu.stationScrollArea,0.5,1)
 end
 
 function timetableGUI.initConstraintTable()
@@ -297,7 +428,7 @@ function timetableGUI.initConstraintTable()
         constraintTableScrollOffset = api.type.Vec2i.new()
     end
 
-    menu.scrollAreaConstraint = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new('scrollAreaConstraint'), "timetable.scrollAreaConstraint")
+    menu.scrollAreaConstraint = api.gui.comp.ScrollArea.new(api.gui.comp.TextView.new('scrollAreaConstraint'), "timetable.scrollAreaConstraint_" .. nextScrollName())
     menu.constraintTable = api.gui.comp.Table.new(1, 'NONE')
     menu.scrollAreaConstraint:setMinimumSize(api.gui.util.Size.new(300, 700))
     menu.scrollAreaConstraint:setMaximumSize(api.gui.util.Size.new(300, 700))
@@ -322,6 +453,8 @@ function timetableGUI.showLineMenu()
         menu.scrollArea = nil
         menu.lineHeader = nil
         menu.stationScrollArea = nil
+        menu.stationHeaderRow = nil
+        menu.stationHeaderRowLineID = nil
         menu.stationTable = nil
         menu.scrollAreaConstraint = nil
         menu.constraintTable = nil
@@ -385,7 +518,134 @@ function timetableGUI.showLineMenu()
     end)
     tolRowLayout:addItem(tolCombo)
     settingsLayout:addItem(tolRow)
+
+    -- 数据同步：把旧版 mod（number 格式）时刻数据迁移到本 mod（string 格式），追加不覆盖。
+    -- 由用户显式点击触发（不做读档自动迁移，保证用户知情）。同步后弹结果窗并刷新界面。
+    local syncRow = api.gui.comp.Component.new("dataSyncRow")
+    local syncRowLayout = api.gui.layout.BoxLayout.new("HORIZONTAL")
+    syncRow:setLayout(syncRowLayout)
+    local syncBtn = api.gui.comp.Button.new(api.gui.comp.TextView.new(UIStrings.data_sync), true)
+    syncRowLayout:addItem(syncBtn)
+    settingsLayout:addItem(syncRow)
+    local syncDesc = api.gui.comp.TextView.new(UIStrings.data_sync_desc)
+    syncDesc:setStyleClassList({"timetable-mono-sc"})
+    settingsLayout:addItem(syncDesc)
+
+    syncBtn:onClick(function()
+        pcall(function()
+            local report = timetable.migrateNumberLineKeys()
+            timetableChanged = true
+            -- 同步后刷新当前打开的时刻表界面（线路表 + 中间站表 + 右侧约束窗口），让新增时刻立即可见
+            pcall(function() timetableGUI.fillLineTable() end)
+            local idx = UIState.currentlySelectedLineTableIndex
+            if idx ~= nil then
+                local lines = timetableHelper.getAllRailLines()
+                if lines and lines[idx + 1] then
+                    timetableGUI.refreshTimetableUI(lines[idx + 1].id)
+                end
+            end
+            showSyncResultWindow(report)
+        end)
+    end)
+
     menu.tabWidget:addTab(api.gui.comp.TextView.new(UIStrings.settings), wrapper3)
+
+    -- 说明页（"设置"Tab 右侧，与"设置"并列的独立界面——用户定稿，不用弹窗）：
+    -- 讲解线路控车开关（到点发车 / 最小 / 最大停站时间）的组合逻辑。长帮助文本按语言内联
+    -- （zh_CN/zh_TW 中文各一份，其余语言用英文），不逐行走 strings.lua（i18n 惯例：非中文=英文）。
+    local helpText = nil
+    do
+        local helpLang = api.util.getLanguage()
+        local hlc = (helpLang and helpLang.code) or "en"
+        if hlc == "zh_CN" then
+            helpText = {
+                { 0, "【线路控车 说明】" },
+                { 0, "◇ 到点发车 ✓：" },
+                { 1, "到点强制发车，无论装卸是否完成。" },
+                { 1, "（勾选后 最小/最大停站时间 会自动清空、不可再勾）" },
+                { 0, "◇ 到点发车 ✗：可单独或组合勾选 最小/最大停站时间。" },
+                { 0, "■ 勾 最小停站时间：" },
+                { 1, "列车在站内至少停满“最小停站时间”。" },
+                { 1, "· 装卸完成：发车时刻未到 → 等到点再发车；" },
+                { 2, "已过发车时刻 → 停满最小时间后发车（晚点超容差仍扣到下一趟）。" },
+                { 1, "· 装卸未完成：继续装卸，装完后再按上条判定。" },
+                { 1, "※ 游戏默认最小停站时间 = 0 秒，不调大则此勾选无实际效果。" },
+                { 0, "■ 勾 最大停站时间：" },
+                { 1, "给停站时长设上限，防止“死等下一趟 / 装卸拖沓”。" },
+                { 1, "· 发车时刻未到：自由装卸，等到点，到点发车（装没装完都发）。" },
+                { 1, "· 已过发车时刻：" },
+                { 2, "装完且晚点在容差内 → 立刻发车；" },
+                { 2, "装完但晚点超容差 / 一直没装完 → 最迟停到“到站+最大停站时间”强制发车。" },
+                { 0, "■ 最小+最大 同时勾：" },
+                { 1, "停站时长限制在 [最小, 最大] 区间内（上面两条合并）。" },
+            }
+        elseif hlc == "zh_TW" then
+            helpText = {
+                { 0, "【線路控車 說明】" },
+                { 0, "◇ 到點發車 ✓：" },
+                { 1, "到點強制發車，無論裝卸是否完成。" },
+                { 1, "（勾選後 最小/最大停站時間 會自動清空、不可再勾）" },
+                { 0, "◇ 到點發車 ✗：可單獨或組合勾選 最小/最大停站時間。" },
+                { 0, "■ 勾 最小停站時間：" },
+                { 1, "列車在站內至少停滿「最小停站時間」。" },
+                { 1, "· 裝卸完成：發車時刻未到 → 等到點再發車；" },
+                { 2, "已過發車時刻 → 停滿最小時間後發車（晚點超容差仍扣到下一趟）。" },
+                { 1, "· 裝卸未完成：繼續裝卸，裝完後再按上條判定。" },
+                { 1, "※ 遊戲預設最小停站時間 = 0 秒，不調大則此勾選無實際效果。" },
+                { 0, "■ 勾 最大停站時間：" },
+                { 1, "給停站時長設上限，防止「死等下一趟 / 裝卸拖沓」。" },
+                { 1, "· 發車時刻未到：自由裝卸，等到點，到點發車（裝沒裝完都發）。" },
+                { 1, "· 已過發車時刻：" },
+                { 2, "裝完且晚點在容差內 → 立刻發車；" },
+                { 2, "裝完但晚點超容差 / 一直沒裝完 → 最遲停到「到站+最大停站時間」強制發車。" },
+                { 0, "■ 最小+最大 同時勾：" },
+                { 1, "停站時長限制在 [最小, 最大] 區間內（上面兩條合併）。" },
+            }
+        else
+            helpText = {
+                { 0, "[Line control switches]" },
+                { 0, "◇ Force departure ✓:" },
+                { 1, "Departure is FORCED at the scheduled time, even if loading is not finished." },
+                { 1, "(Ticking it clears and disables Min./Max. wait)" },
+                { 0, "◇ Force departure ✗ — tick Min./Max. wait alone or together:" },
+                { 0, "■ Min. wait ticked:" },
+                { 1, "The train must stay at the station at least the \"min waiting time\"." },
+                { 1, "· Loading finished: before departure time → wait until it departs;" },
+                { 2, "past departure time → leave once the min. time is met (still waits for" },
+                { 2, "the next slot if the delay exceeds the tolerance)." },
+                { 1, "· Loading not finished: keep loading, then apply the rules above." },
+                { 1, "Note: the game default min waiting time is 0 s — no real effect unless raised." },
+                { 0, "■ Max. wait ticked:" },
+                { 1, "Caps the dwell time (avoids waiting forever / endless loading)." },
+                { 1, "· Before departure time: load freely; leave AT the departure time" },
+                { 2, "(forced, even if loading is unfinished)." },
+                { 1, "· Past departure time:" },
+                { 2, "loading done & delay within tolerance → leave immediately;" },
+                { 2, "loading done but beyond tolerance, or still loading → forced out no" },
+                { 2, "later than \"arrival + max waiting time\"." },
+                { 0, "■ Min. + Max. both ticked:" },
+                { 1, "Dwell time is clamped to the [min, max] interval (rules above combined)." },
+            }
+        end
+    end
+    local wrapper4 = api.gui.comp.Component.new("wrapper4")
+    local helpLayout = api.gui.layout.BoxLayout.new("VERTICAL")
+    wrapper4:setLayout(helpLayout)
+    local helpLang = api.util.getLanguage()
+    local helpStyle = local_styles[helpLang and helpLang.code or "en"]
+    for _, li in ipairs(helpText) do
+        if li[2] == "" then
+            local spacer = api.gui.comp.Component.new("helpSpacer")
+            spacer:setMinimumSize(api.gui.util.Size.new(10, 8))
+            spacer:setMaximumSize(api.gui.util.Size.new(10, 8))
+            helpLayout:addItem(spacer)
+        else
+            local t = api.gui.comp.TextView.new(string.rep("   ", li[1]) .. li[2])
+            if helpStyle then t:setStyleClassList({ helpStyle }) end
+            helpLayout:addItem(t)
+        end
+    end
+    menu.tabWidget:addTab(api.gui.comp.TextView.new(UIStrings.help), wrapper4)
 
     menu.tabWidget:onCurrentChanged(function(i)
         if i == 1 then
@@ -412,6 +672,8 @@ function timetableGUI.showLineMenu()
         menu.lineTableItems = {}
         menu.scrollArea = nil
         menu.stationScrollArea = nil
+        menu.stationHeaderRow = nil
+        menu.stationHeaderRowLineID = nil
         menu.scrollAreaConstraint = nil
         menu.lineHeader = nil
         menu.stationTabScrollArea = nil
@@ -420,6 +682,12 @@ function timetableGUI.showLineMenu()
         stationSummaryRefreshDue = nil
         timetableChanged = false
         _G._timetableVisible = false
+        -- 本窗口已销毁/关闭，清掉全局引用：运行图 showDiagram 的 invokeLater 会对
+        -- _G._timetableWindow 调 setVisible(true,false) 尝试恢复时刻表窗口——
+        -- 若该引用指向已销毁窗口，会操作无效组件（崩溃）。清空后 restore 逻辑自然跳过。
+        if _G._timetableWindow == menu.window then
+            _G._timetableWindow = nil
+        end
         menu.window = nil
     end)
 
@@ -592,6 +860,100 @@ end
 ---------------------- Middle TABLE -------------------------
 -------------------------------------------------------------
 
+-- 线路控车开关行（2026-08-16 功能）：频率 + 到点发车 / 最小停站时间 / 最大停站时间。
+-- 独立固定行，置于中间站表滚动区上方 (0.5,0)——**不放进 Table:setHeader**：表头单元格
+-- 引擎层不可点击、行高受限还会裁切文字（玩家实测 2026-08-16：默认勾选但点不了、频率底边被遮）。
+-- 复用左栏"排序按钮行在列表上方"的同款模式：同一线路不重建（防刷新闪烁），换线路才
+-- removeItem 旧行 + addItem 新行。勾选交互与左栏"遵循时刻表"复选框同构（Button 换图，实测可点）。
+function timetableGUI.refreshStationHeaderRow(lineID)
+    if menu.stationHeaderRow and menu.stationHeaderRowLineID == lineID then
+        return  -- 同一线路：行已在布局中，不重建（fillStationTable 每次刷新都进来）
+    end
+    if menu.stationHeaderRow then
+        pcall(function() UIState.boxlayout2:removeItem(menu.stationHeaderRow) end)
+        menu.stationHeaderRow = nil
+    end
+    menu.stationHeaderRowLineID = lineID
+    if not lineID then return end
+
+    local freqLbl = api.gui.comp.TextView.new(UIStrings.frequency .. " " .. timetableHelper.getFrequency(lineID))
+    freqLbl:setStyleClassList({"timetable-mono-sc"})
+    local forceDep = timetable.getForceDepartureEnabled(lineID)
+    -- 互斥语义（2026-08-16 玩家拍板）：到点发车 = "到点强发"模式，与 最小/最大停站时间 互斥。
+    -- 勾选到点发车 → 清空 min/max 勾选（不再"置灰保留"——三格全勾太误导）；这里顺带自愈
+    -- 旧版/旧档残留的 "force✓ + min/max✓" 状态（此前被置灰保留过）。清空要同步引擎（timetableChanged）。
+    if forceDep and (timetable.getMinWaitEnabled(lineID) or timetable.getMaxWaitEnabled(lineID)) then
+        timetable.setMinWaitEnabled(lineID, false)
+        timetable.setMaxWaitEnabled(lineID, false)
+        timetableChanged = true
+    end
+    local minEn = timetable.getMinWaitEnabled(lineID)
+    local maxEn = timetable.getMaxWaitEnabled(lineID)
+    local function ckImg(on) return api.gui.comp.ImageView.new(on and "ui/checkbox1.tga" or "ui/checkbox0.tga") end
+    local forceImg, minImg, maxImg = ckImg(forceDep), ckImg(minEn), ckImg(maxEn)
+    local forceBtn = api.gui.comp.Button.new(forceImg, true)
+    local minBtn = api.gui.comp.Button.new(minImg, true)
+    local maxBtn = api.gui.comp.Button.new(maxImg, true)
+    for _, b in ipairs({forceBtn, minBtn, maxBtn}) do
+        b:setStyleClassList({"timetable-avtivateTimetableButton"})
+    end
+    local function clearMinMax()
+        timetable.setMinWaitEnabled(lineID, false)
+        timetable.setMaxWaitEnabled(lineID, false)
+        pcall(function() minImg:setImage("ui/checkbox0.tga", false) end)
+        pcall(function() maxImg:setImage("ui/checkbox0.tga", false) end)
+    end
+    local function updateMinMaxEnabled()
+        local on = not timetable.getForceDepartureEnabled(lineID)
+        pcall(function() minBtn:setEnabled(on) end)
+        pcall(function() maxBtn:setEnabled(on) end)
+    end
+    updateMinMaxEnabled()
+    forceBtn:onClick(function()
+        local now = not timetable.getForceDepartureEnabled(lineID)
+        timetable.setForceDepartureEnabled(lineID, now)
+        pcall(function() forceImg:setImage(now and "ui/checkbox1.tga" or "ui/checkbox0.tga", false) end)
+        if now then
+            clearMinMax()  -- 勾选到点发车 = 切到点强发模式：清掉互斥的 min/max 勾选
+        end
+        updateMinMaxEnabled()
+        timetableChanged = true
+    end)
+    local function makeToggle(btn, img, getter, setter)
+        btn:onClick(function()
+            if timetable.getForceDepartureEnabled(lineID) then return end  -- force 勾选时不可选（双保险）
+            local now = not getter(lineID)
+            setter(lineID, now)
+            pcall(function() img:setImage(now and "ui/checkbox1.tga" or "ui/checkbox0.tga", false) end)
+            timetableChanged = true
+        end)
+    end
+    makeToggle(minBtn, minImg, timetable.getMinWaitEnabled, timetable.setMinWaitEnabled)
+    makeToggle(maxBtn, maxImg, timetable.getMaxWaitEnabled, timetable.setMaxWaitEnabled)
+    local function ctlGroup(lbl, btn)
+        local c = api.gui.comp.Component.new("ctlGroup")
+        local l = api.gui.layout.BoxLayout.new("HORIZONTAL")
+        c:setLayout(l)
+        local t = api.gui.comp.TextView.new(lbl)
+        t:setStyleClassList({"timetable-mono-sc"})
+        l:addItem(t)
+        l:addItem(btn)
+        return c
+    end
+    local headerRow = api.gui.comp.Component.new("stationHeaderControls")
+    local hrl = api.gui.layout.BoxLayout.new("HORIZONTAL")
+    headerRow:setLayout(hrl)
+    hrl:addItem(freqLbl)
+    hrl:addItem(ctlGroup(UIStrings.force_departure, forceBtn))
+    hrl:addItem(ctlGroup(UIStrings.min_wait, minBtn))
+    hrl:addItem(ctlGroup(UIStrings.max_wait, maxBtn))
+    -- 行高 34：给足高度防止文字/复选框被裁（玩家反馈"频率下五分之一被遮"的根因是表头单元格行高太矮）。
+    headerRow:setMinimumSize(api.gui.util.Size.new(460, 34))
+    headerRow:setMaximumSize(api.gui.util.Size.new(460, 34))
+    menu.stationHeaderRow = headerRow
+    pcall(function() UIState.boxlayout2:addItem(headerRow, 0.5, 0) end)
+end
+
 -- params
 -- index: index of currently selected line
 -- bool: emit select signal when building table
@@ -611,7 +973,10 @@ function timetableGUI.fillStationTable(index, bool)
     UIState.currentlySelectedLineTableIndex = index
     local lineID = timetableHelper.getAllRailLines()[index+1].id
 
-    local header1 = api.gui.comp.TextView.new(UIStrings.frequency .. " " .. timetableHelper.getFrequency(lineID))
+    -- 线路控车开关（频率 + 到点发车/最小/最大停站时间）由 refreshStationHeaderRow 维护为
+    -- 站表上方的独立固定行（不进 setHeader——表头单元格不可点击且会裁切文字，玩家实测）。
+    timetableGUI.refreshStationHeaderRow(lineID)
+    local header1 = api.gui.comp.TextView.new("")
     local header2 = api.gui.comp.TextView.new("")
     local header3 = api.gui.comp.TextView.new("")
     local header4 = api.gui.comp.TextView.new("")
@@ -620,7 +985,7 @@ function timetableGUI.fillStationTable(index, bool)
     local stationLegTime = timetableHelper.getLegTimes(lineID)
     menu.allStops = timetableHelper.getAllStops(lineID)
 
-    -- 为路径点覆盖自定义名称
+    -- 为路径点覆盖自定义名称（全局名优先；旧存档 per-line 名仅作一次性迁移来源）
     for _, stopInfo in ipairs(menu.allStops) do
         if stopInfo.type == "waypoint" then
             if stopInfo.gwKey then
@@ -633,6 +998,12 @@ function timetableGUI.fillStationTable(index, bool)
                 local customName = timetable.getWaypointName(lineID, stopInfo.id)
                 if customName then
                     stopInfo.name = customName
+                    -- 自愈迁移：旧存档的 per-line 名字提升为全局名（写 _G + timetableObject 双份），
+                    -- 之后所有线路都显示同一个名字；触发同步持久化。
+                    if stopInfo.gwKey then
+                        timetable.setGlobalWaypointName(stopInfo.gwKey, customName)
+                        timetableChanged = true
+                    end
                 end
             end
         end
@@ -793,11 +1164,11 @@ function timetableGUI.refreshTimetableUI(lineID)
     end
 end
 
--- 中间站表摘要延迟刷新：onChange 逐位触发时不断重置计时，输入停顿约 1s（游戏时间）后
--- 才重建中间站表，让该行条件摘要（到发时间等）显示新值。只刷中间表、不重建右侧约束窗口，
--- 避免打断 SpinBox 输入焦点（AGENTS.md "13:30 变 00:30" 教训）。
+-- 中间站表摘要延迟刷新：onChange 逐位触发时不断重置计时，输入停顿约 1s（真实时间，暂停也触发）
+-- 后才重建中间站表，让该行条件摘要（到发时间/路径点名/通过时间）显示新值。只刷中间表、不重建
+-- 右侧约束窗口，避免打断 SpinBox 输入焦点（AGENTS.md "13:30 变 00:30" 教训）。
 function timetableGUI.scheduleStationSummaryRefresh()
-    stationSummaryRefreshDue = timetableHelper.getTime() + 1
+    stationSummaryRefreshDue = realTimeNow() + 1
 end
 
 function timetableGUI.fillConstraintTable(index, lineID)
@@ -825,12 +1196,11 @@ function timetableGUI.fillConstraintTable(index, lineID)
         comboBox:onIndexChanged(function (i)
             if i == -1 then return end
             timetableChanged = true
+            -- 名称输入始终显示；"通过时间"选择态决定是否展开通过时间编辑器
+            timetableGUI.clearConstraintWindow()
+            timetableGUI.makeWaypointNameWindow(lineID, stopInfo.id, stopInfo.gwKey)
             if i == 1 then
-                -- 先清残留行再构建，避免反复切换 None/Passing 时旧输入框叠加"重影"
-                timetableGUI.clearConstraintWindow()
                 timetableGUI.makePassingWindow(lineID, stopInfo.id, stopInfo.gwKey)
-            else
-                timetableGUI.clearConstraintWindow()
             end
         end)
 
@@ -848,6 +1218,9 @@ function timetableGUI.fillConstraintTable(index, lineID)
         table:addRow({infoImage, comboBox, refreshBtn})
         menu.constraintTable:addRow({table})
         comboBox:setSelected(selectedIdx, false)
+
+        -- 名称输入框始终显示（不依赖点击"通过时间"）
+        timetableGUI.makeWaypointNameWindow(lineID, stopInfo.id, stopInfo.gwKey)
 
         if hasTimes then
             timetableGUI.makePassingWindow(lineID, stopInfo.id, stopInfo.gwKey)
@@ -918,6 +1291,48 @@ function timetableGUI.makeArrDepWindow(lineID, stationID)
             timetableGUI.rebuildConstraintWindow(lineID)
         end
     end)
+
+    -- 自动时刻间隔生成行（2026-08-16 功能，位置在"约束下拉+刷新"行之下、"添加"行之上）：
+    -- Separation 下拉（间隔分钟，都整除 60）+ 生成按钮。以第一条模板时刻为基准，把整小时补齐等间隔时刻。
+    local SEPARATION_LIST = {30, 20, 15, 12, 10, 7.5, 6, 5, 4, 3, 2.5, 2, 1.5, 1.2, 1}
+    local separationCombo = api.gui.comp.ComboBox.new()
+    for _, sep in ipairs(SEPARATION_LIST) do
+        separationCombo:addItem(string.format("%g min (%g/h)", sep, 60 / sep))
+    end
+    separationCombo:setGravity(1, 0)
+    local generateButton = api.gui.comp.Button.new(api.gui.comp.TextView.new(UIStrings.generate), true)
+    generateButton:setGravity(1, 0)
+    generateButton:onClick(function()
+        local conds = timetable.getConditions(lineID, stationID, "ArrDep")
+        if type(conds) ~= "table" or #conds < 1 then
+            print("[Timetable] Generate: 需要先添加一条模板时刻（Arr/Dep）")
+            return
+        end
+        local sepIdx = separationCombo:getCurrentIndex()
+        if sepIdx == nil or sepIdx < 0 then
+            print("[Timetable] Generate: 需要先选择间隔（Separation）")
+            return
+        end
+        local sep = SEPARATION_LIST[sepIdx + 1]
+        local template = conds[1]
+        -- 已有 >1 条：保留第一条作模板、清空其余再重新生成（防连点叠加）
+        if #conds > 1 then
+            timetable.removeAllConditions(lineID, stationID, "ArrDep")
+            timetable.addCondition(lineID, stationID, {type = "ArrDep", ArrDep = {template}})
+        end
+        for i = 1, 60 / sep - 1 do
+            timetable.addCondition(lineID, stationID, {type = "ArrDep", ArrDep = {timetable.shiftSlot(template, i * sep * 60)}})
+        end
+        timetableChanged = true
+        clearConstraintWindowLaterHACK = function()
+            timetableGUI.initStationTable()
+            timetableGUI.fillStationTable(UIState.currentlySelectedLineTableIndex, false)
+            timetableGUI.rebuildConstraintWindow(lineID)
+        end
+    end)
+    local sepRow = api.gui.comp.Table.new(3, 'NONE')
+    sepRow:addRow({api.gui.comp.TextView.new(UIStrings.separation), separationCombo, generateButton})
+    menu.constraintTable:addRow({sepRow})
 
     --setup header
     local headerTable = api.gui.comp.Table.new(4, 'NONE')
@@ -1071,7 +1486,10 @@ function timetableGUI.makeDebounceWindow(lineID, stationID)
 
 end
 
-function timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
+-- 路径点名称编辑窗口：路径点页面【始终显示】，不依赖点击"通过时间"。
+-- 改名即时保存（onChange 逐字写入全局名 _gwNames，跨线路全局同步）+ 1s 真实时间 debounce
+-- 自动刷新中间站表；失焦整表重建让名字在所有线路生效。
+function timetableGUI.makeWaypointNameWindow(lineID, wpEntity, gwKey)
     if not menu.constraintTable then return end
     local currentName = ""
     if gwKey then
@@ -1081,15 +1499,13 @@ function timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
         currentName = timetable.getWaypointName(lineID, wpEntity) or ""
     end
 
-    -- 名称编辑
-    local nameInput = nil
     local ok, inputField = pcall(function()
         return api.gui.comp.TextInputField.new("")
     end)
-    -- 提交名字（全局改名：_G._gwNames + timetableObject 双写，含 per-line 覆盖），不要破坏全局语义
+    -- 提交名字（只写全局名）：gwKey 基于路径点实体（SignalId entity/index），跨线路全局同步。
+    -- per-line 名字仓库（waypointNames）不再写入，避免"同一实体多名字"分歧。
     local function commitName(text)
         pcall(function()
-            timetable.setWaypointName(lineID, wpEntity, text)
             if gwKey then
                 timetable.setGlobalWaypointName(gwKey, text)
             end
@@ -1104,32 +1520,34 @@ function timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
             timetableGUI.rebuildConstraintWindow(lineID)
         end
     end
-    if ok and inputField then
-        nameInput = inputField
-        if currentName and #currentName > 0 then
-            nameInput:setText(currentName, false)
-        end
-        nameInput:onChange(function(text)
-            commitName(text)
-        end)
-        pcall(function()
-            nameInput:onFocusLost(function()
-                refreshWaypointUI()
-            end)
-        end)
-    end
+
     local nameTable = api.gui.comp.Table.new(2, 'NONE')
     nameTable:setColWidth(0,80)
     local nameLabel = api.gui.comp.TextView.new(UIStrings.name_label)
-    if nameInput then
-        -- 名字由 onChange 逐字写入 + 顶部"刷新"按钮统一保存重建，不再单独设保存按钮
-        nameTable:addRow({nameLabel, nameInput})
+    if ok and inputField then
+        if currentName and #currentName > 0 then
+            inputField:setText(currentName, false)
+        end
+        inputField:onChange(function(text)
+            commitName(text)
+            timetableGUI.scheduleStationSummaryRefresh()
+        end)
+        pcall(function()
+            inputField:onFocusLost(function()
+                refreshWaypointUI()
+            end)
+        end)
+        nameTable:addRow({nameLabel, inputField})
     else
         local showName = api.gui.comp.TextView.new(currentName and #currentName > 0 and currentName or UIStrings.rename_hint)
         showName:setStyleClassList({"timetable-mono-sc"})
         nameTable:addRow({nameLabel, showName})
     end
     menu.constraintTable:addRow({nameTable})
+end
+
+function timetableGUI.makePassingWindow(lineID, wpEntity, gwKey)
+    if not menu.constraintTable then return end
 
     -- 通过时间编辑(多组，支持添加删除)
     local times = timetable.getWaypointPassingTime(lineID, wpEntity)
@@ -1249,11 +1667,12 @@ local function getPlannedArrDep(lineID, stationNumber, actualArrTime)
     return bestArr, bestDep
 end
 
--- 晚点/正点/早点判定：|diff|<=10s 正点，正=晚 负=早
+-- 晚点/正点/早点判定：|diff|<=阈值 正点，正=晚 负=早。阈值 = 运行图设置"准点判定阈值"（秒，默认10）。
 local function classify(diff)
     if not diff then return "ontime" end
-    if diff > 10 then return "late" end
-    if diff < -10 then return "early" end
+    local tol = timetable.getPunctThreshold()
+    if diff > tol then return "late" end
+    if diff < -tol then return "early" end
     return "ontime"
 end
 
@@ -1264,19 +1683,20 @@ function timetableGUI.updatePunctuality()
     if now < _G._punctNext then return end
     _G._punctNext = now + 1  -- 每秒扫一次（getTime 整秒）
 
-    local vehicleMap = api.engine.system.transportVehicleSystem.getLine2VehicleMap()
+    local okMap, vehicleMap = pcall(_lineVehicleMap)
+    if not okMap or not vehicleMap then return end
     for lineID, vehicles in pairs(vehicleMap) do
         local lineName = nil
-        pcall(function()
-            local nc = api.engine.getComponent(lineID, api.type.ComponentType.NAME)
-            if nc and nc.name then lineName = nc.name end
-        end)
+        local okN, nc = pcall(_getComponent, lineID, api.type.ComponentType.NAME)
+        if okN and nc and nc.name then lineName = nc.name end
         if vehicles then
             for _, vehicle in pairs(vehicles) do
-                local vId = tostring(vehicle)
-                local okC, vc = pcall(function()
-                    return api.engine.getComponent(vehicle, 70)
-                end)
+                -- 车辆可能已被卖出/删除（getLine2VehicleMap 快照可能含失效 ID）：
+                -- getComponent 对失效实体触发 C++ assert（GetComponentDataIndex，pcall 抓不住）。
+                local okEv, exists = pcall(_entityExists, tonumber(vehicle))
+                if okEv and exists == true then
+                    local vId = tostring(vehicle)
+                    local okC, vc = pcall(_getComponent, vehicle, 70)
                 if okC and vc then
                     local st = punctualityState[vId]
                     if not st then
@@ -1296,10 +1716,17 @@ function timetableGUI.updatePunctuality()
                         st.depTime = nil
                         st.arrDone = false
                         st.stationName = nil
-                        pcall(function()
-                            local sg = api.engine.getComponent(vc.stopIndex, api.type.ComponentType.NAME)
-                            if sg and sg.name then st.stationName = sg.name end
-                        end)
+                        -- 站名读取：vc.stopIndex 是"线路停站位置索引"（int），不是站组实体 ID——
+                        -- 直接用 stopIndex 当实体 ID 调 getComponent 会触发 C++ assert
+                        -- （GetComponentDataIndex，pcall 抓不住）。用 entityExists 校验后跳过。
+                        local idx = vc.stopIndex
+                        if idx ~= nil then
+                            local okIe, idxExists = pcall(_entityExists, idx)
+                            if okIe and idxExists == true then
+                                local okSg, sg = pcall(_getComponent, idx, api.type.ComponentType.NAME)
+                                if okSg and sg and sg.name then st.stationName = sg.name end
+                            end
+                        end
                         -- 进站立即用到达偏差判定（早到/正点/晚点），发车前即可显示。
                         -- 多套时刻表时自动选"绝对到达时刻离实际到达最近"的那一套（getPlannedArrDep），
                         -- 避免列车跑第二套却拿第一套判正晚点。
@@ -1315,11 +1742,18 @@ function timetableGUI.updatePunctuality()
                     -- 该值在车发车后写入（如 time=360 发车 → 值 360），且发车后 stopIndex 前进、
                     -- state 变 1 时仍保留历史值，故不依赖 state==2，只要该站 dep 从 0/旧值变非 0 即判定发车。
                     -- 不依赖 st.arrTime：即使到站事件漏拍（短停站/加载时已停稳），发车事件也能被捕获并给出发车判定。
+                    -- 关键守卫（2026-08-05）：lineStopDepartures 记录的是"该站最近一次发车"，跨周期不清零。
+                    -- 列车上一周期从本站发车（如 23:32）后、本周期再回到本站时，该字段仍留着旧值——
+                    -- 若直接把 d>0 当成"本次刚发车"，会拿上一周期的旧发车时刻去减本周期选定那套时刻表的
+                    -- 计划发车（多套时刻表：旧值对应第一套、计划对应第二套 → 假"早24分钟"）。
+                    -- 判定逻辑抽到 timetable.isValidDepartureRecord（可单测），此处只调用。
                     if not st.arrDone then
                         local depTime = nil
                         if vc.lineStopDepartures and st.thisStopIndex then
                             local d = vc.lineStopDepartures[st.thisStopIndex + 1]
-                            if d and d > 0 then depTime = math.floor(d / 1000) end
+                            if timetable.isValidDepartureRecord(d, now, st.arrTime) then
+                                depTime = math.floor(d / 1000)
+                            end
                         end
                         -- 发车定案：引擎已给出该站实际发车秒
                         if depTime and depTime ~= st.depTime then
@@ -1355,6 +1789,7 @@ function timetableGUI.updatePunctuality()
                     st.lineId = lineID
                     st.lineName = lineName or st.lineName
                 end
+                end -- if okEv and exists == true then
             end
         end
     end
@@ -1363,25 +1798,75 @@ function timetableGUI.updatePunctuality()
     _G._punctuality = punctualityState
 end
 
+-- ===== 性能优化 A 组（2026-08-16 第 21 轮）：控车协程的三处改造 =====
+-- 1) 勾选线路清单（纯 Lua，从 timetableObject 取）：本来只有"勾选了遵循时刻表"的线路才需要控车，
+--    清单为空时**整个扫描都不用做**（原实现即使一条线都没勾选，也每帧扫全世界停站车辆）。
+-- 2) 列表为空时不再"每个 resume 重扫一遍"：update() 每帧最多 resume 21 次，而协程体是
+--    `while true do 扫描; for … yield end; yield end` —— 列表为空时每次 resume 都会重新扫描
+--    （21 次/帧，每次 = 全世界停站车辆 + 每辆 2 次引擎调用 + 2 个闭包）。现在用帧号标记：
+--    同一帧内已经扫过就直接 `yield("idle")`，update() 收到 "idle" 立即结束本帧的 resume 循环
+--    → **扫描频率仍是"每帧一次"**（与车辆到站响应速度完全一致），只是不再重复 21 遍。
+-- 3) 只做一次 getTimetableObject()（引擎线程副本），供清单与扫描共用。
+local EMPTY_VEHICLE_LIST = {}
 function timetableGUI.timetableCoroutine()
+    local scannedFrame = -1        -- 本协程最近一次全量扫描所在的帧号
+    local tickedLines = {}         -- 勾选"遵循时刻表"的线路 ID（>0）
     while true do
-        local vehiclesWithLines = timetableHelper.getAllTimetableRailVehicles(timetable.hasTimetable)
-        for _,vehicle in pairs(vehiclesWithLines) do
-            --if timetableHelper.isInStation(vehicle) then
-                local vehicleStr = tostring(vehicle)
-                -- 记录"等待→放行"瞬间：放行时若之前正被扣车，则调 forceDeparture
-                -- 真正启动车辆（否则仅 setVehicleManualDeparture(false) 可能不立即发车）。
-                local wasWaiting = timetable.isVehicleWaiting(vehicleStr)
-                if timetable.waitingRequired(vehicleStr) then
-                    timetableHelper.stopVehicle(vehicleStr)
-                else
-                    timetableHelper.startVehicle(vehicleStr)
-                    if wasWaiting then timetableHelper.forceDeparture(vehicleStr) end
+        local list = nil
+        if scannedFrame == _G._ttCoFrame then
+            -- 本帧已经扫过：不再重复扫描，把本帧剩余的 resume 配额交还给引擎
+            coroutine.yield("idle")
+        else
+            scannedFrame = _G._ttCoFrame
+            -- 勾选线路清单（纯 Lua，无引擎调用）
+            local n = 0
+            local to = timetable.getTimetableObject()
+            if type(to) == "table" then
+                for k, e in pairs(to) do
+                    local id = tonumber(k)
+                    if id and id > 0 and type(e) == "table" and e.hasTimetable == true then
+                        n = n + 1
+                        tickedLines[n] = id
+                    end
                 end
-            --end
+            end
+            for i = n + 1, #tickedLines do tickedLines[i] = nil end   -- 收缩旧内容
+            if n == 0 then
+                list = EMPTY_VEHICLE_LIST      -- 没有任何线路在跑时刻表 → 不控车、也不扫描
+            else
+                list = timetableHelper.getAllTimetableRailVehicles(timetable.hasTimetable, tickedLines)
+            end
+        end
+        if list then
+            for _,vehicle in pairs(list) do
+                local vehicleStr = tostring(vehicle)
+                local skip = false
+                -- 交路系统（TrainRoute mod）钩子：热备车由交路系统强制停车管理（setUserStopped(true) 常停），
+                -- 不走时刻表逻辑；换乘站真车由交路系统按"下一线路发车时刻"单独扣车/换线。
+                -- 未安装 TrainRoute → 钩子 nil → 不跳过任何车（保持原行为）。
+                local trHooks = _G._trainRouteHooks
+                if trHooks then
+                    local okSB, isSb = pcall(trHooks.isStandby, vehicleStr)
+                    if okSB and isSb then skip = true end
+                    if not skip then
+                        local okMV, isMv = pcall(trHooks.managesVehicle, vehicleStr)
+                        if okMV and isMv then skip = true end
+                    end
+                end
+                if not skip then
+                    -- 扣车/放行判定。放行时的 forceDeparture（setVehicleShouldDepart 真启动）
+                    -- 已由 waitingRequired 内部无条件处理（含"已过发车时刻、晚点在容差内、
+                    -- 车首次到站从未被扣"的场景）；这里只需 stopVehicle / startVehicle。
+                    if timetable.waitingRequired(vehicleStr) then
+                        timetableHelper.stopVehicle(vehicleStr)
+                    else
+                        timetableHelper.startVehicle(vehicleStr)
+                    end
+                end
+                coroutine.yield()
+            end
             coroutine.yield()
         end
-        coroutine.yield()
     end
 end
 
@@ -1392,6 +1877,25 @@ function data()
         handleEvent = function (_, id, _, param)
             if id == "timetableUpdate" then
                 if state == nil then state = {timetable = {}} end
+                -- 数据安全防御（2026-08-09 补）：GUI 线程若因模块重载/加载失败发出
+                -- 不含线路条目的对象（只剩 _diagram* 设置键/空表），或丢了已存预设(dp)，
+                -- 而引擎已加载完整线路/预设，拒绝用它覆盖——否则下次存档会把已保存的
+                -- 时刻表/运行图配置清空。拒绝日志受 _G._diagramDebug 控制（默认关闭）。
+                local paramHasLines = timetable.hasLineEntries(param)
+                local engineHasLines = timetable.hasLineEntries(state.timetable)
+                local paramHasPresets = timetable.hasAnyPreset(param)
+                local engineHasPresets = timetable.hasAnyPreset(state.timetable)
+                local rejected = (not paramHasLines and engineHasLines)
+                    or (engineHasPresets and not paramHasPresets)
+                if rejected then
+                    if _G._diagramDebug then
+                        print("[Timetable] sync REJECTED: paramLines=" .. tostring(paramHasLines)
+                            .. " engineLines=" .. tostring(engineHasLines)
+                            .. " paramPresets=" .. tostring(paramHasPresets)
+                            .. " enginePresets=" .. tostring(engineHasPresets))
+                    end
+                    return
+                end
                 state.timetable = param
                 timetable.setTimetableObject(state.timetable)
                 timetableChanged = true
@@ -1411,6 +1915,9 @@ function data()
             if loadedState.currentlyWaiting then
                 timetable.setCurrentlyWaiting(loadedState.currentlyWaiting)
             end
+            -- 兼容旧存档：currentlyWaiting 里可能有缺失 outboundTime / 旧版标量的停站条目，
+            -- 不清理会在 waitingRequired 写 outboundTime[vehicle] 时崩溃（协程死循环）
+            pcall(function() timetable.sanitizeCurrentlyWaiting() end)
 
             if loadedState.diagramConfig then
                 timetable.setDiagramConfig(loadedState.diagramConfig)
@@ -1425,16 +1932,71 @@ function data()
 
         update = function()
             if state == nil then state = {timetable = {}}end
-            if co == nil or coroutine.status(co) == "dead" then
+            -- 帧号（性能优化 A 组）：供控车协程判断"本帧是否已经扫描过"，避免列表为空时
+            -- 每次 resume 都重扫一遍全世界车辆（原实现最多 21 次/帧）。
+            _G._ttCoFrame = (_G._ttCoFrame or 0) + 1
+            -- 协程自愈（2026-08-16 加固）：C++ assert（如 getComponent 打到无效实体，
+            -- AGENTS.md 教训）会绕过 Lua 的 yield/return 把协程留在 "running" 状态——
+            -- status 既非 dead 也非 suspended，resume 报 "cannot resume non-suspended coroutine"
+            -- 且被节流打印后每帧刷屏，永不重建。除 suspended 外一律重建：
+            -- running=被 assert 卡死；dead=正常退出；normal=本场景不应出现（防御重建）。
+            local coStatus = co and coroutine.status(co) or "dead"
+            if coStatus ~= "suspended" then
                 co = coroutine.create(timetableGUI.timetableCoroutine)
             end
+            -- 死协程每帧 resume 20 次会各打印一次错误 → 控制台刷屏（玩家反馈"日志一直刷新"）。
+            -- 修复：status==dead 直接 break；错误只节流打印一次/秒。
+            -- 性能优化 A 组追加：协程 yield "idle"（本帧已扫描过）→ 立即结束本帧的 resume 循环。
             for _ = 0, 20 do
+                if coroutine.status(co) == "dead" then break end
                 local err, msg = coroutine.resume(co)
-                if not err then print(msg) end
+                if not err then
+                    local now = realTimeNow()
+                    if not _G._coErrThrottle or now - _G._coErrThrottle > 1 then
+                        _G._coErrThrottle = now
+                        print(msg)
+                    end
+                    break
+                end
+                if msg == "idle" then break end
             end
 
+            -- 交路系统调度已移到独立 mod TrainRoute（其 game_script 的 update 内自行调用 tick）
             -- 准点检测移到 guiUpdate（GUI 线程）执行：
             -- GUI 线程能读引擎 API，且与 diagram_gui 同线程，数据写 _G._punctuality 直接可见
+
+            -- 残留扣车清理（2026-08-16 诊断结论）：旧版 mod 对"未勾选但残留时刻数据"的线路
+            -- 设置过 setVehicleManualDeparture(true)，标志随存档持久化 → 车永远停站
+            -- （autoDeparture=false、timeUntilDep 冻结、days 增长）。进档立即清一次 + 每 30s
+            -- 自愈一次：清"有条目但未勾选"线路车辆上的 manualDeparture（只清 manualDeparture，
+            -- 不动 userStopped=TrainRoute 热备车领域）。
+            local holdNow = rawRealSeconds()
+            if holdNow then
+                if not _G._ttStaleHoldDue or holdNow >= _G._ttStaleHoldDue then
+                    _G._ttStaleHoldDue = holdNow + 30
+                    -- 性能优化 A 组：clearStaleHolds 已改为候选驱动（无"有数据但未勾选"的线路
+                    -- 时零引擎调用），这笔 30s 尖峰在正常玩法下直接消失。
+                    pcall(timetable.clearStaleHolds)
+                end
+            end
+
+            -- 5s 维护（性能优化 A 组：两件事合并为一次取数）
+            --   ① 清理已删除线路的孤儿时刻表数据（车站 Tab 会遍历 timetableObject，孤儿条目显示 ERROR）；
+            --   ② 车站/线路结构对账（拆/建站后停站重新编号，时刻数据按位置存储会错位）。
+            -- 原实现是两次独立调用（cleanupOrphanLines 内部取一次 getLines、reconcileStationData
+            -- 内部逐线 entityExists）→ 现在 maintainTimetableData() 只取一次 getLines，
+            -- 幸存线路用同一份集合对账。用真实时间（os.clock）节流：暂停时也走。
+            -- 清理直接改引擎线程的 timetableObject，由下方 state.timetable = to 持久化；
+            -- 引擎线程的 timetableChanged 与 GUI 线程不共享，无需设置。
+            local rtNow = rawRealSeconds()
+            if rtNow then
+                if not _G._ttOrphanCleanDue then _G._ttOrphanCleanDue = rtNow + 5 end
+                if rtNow >= _G._ttOrphanCleanDue then
+                    _G._ttOrphanCleanDue = rtNow + 5
+                    pcall(timetable.maintainTimetableData)
+                end
+            end
+
             local to = timetable.getTimetableObject()
             if to then
                 for _, entry in pairs(to) do
@@ -1444,6 +2006,7 @@ function data()
                     end
                 end
             end
+
             state.timetable = to
             state.currentlyWaiting = timetable.getCurrentlyWaiting()
             state.diagramConfig = timetable.getDiagramConfig()
@@ -1454,8 +2017,47 @@ function data()
             if not _G._gwNames and state and state.timetable and state.timetable._gwNames then
                 _G._gwNames = state.timetable._gwNames
             end
+            -- GUI 线程孤儿线路清理（数据源侧）：timetableObject 在 GUI 线程被编辑并同步到引擎线程，
+            -- 删除线路后 GUI 线程的副本会残留孤儿（车站 Tab 显示 ERROR）。每 ~5s 节流清理一次，
+            -- 用 os.clock（真实时间）暂停也走。清理后置 timetableChanged 触发下方 sendScriptEvent 同步。
+            -- 关键：清理孤儿后若车站 Tab 有选中站，右侧线路表（stationTabLinesTable）不会自动重填——
+            -- 玩家删线路前渲染的 "ERROR" 行仍显示在屏幕上（即使数据已过滤）。故清理后重填右侧表。
+            local guiRtNow = rawRealSeconds()
+            if guiRtNow then
+                if not _G._ttGuiOrphanCleanDue then _G._ttGuiOrphanCleanDue = guiRtNow + 5 end
+                if guiRtNow >= _G._ttGuiOrphanCleanDue then
+                    _G._ttGuiOrphanCleanDue = guiRtNow + 5
+                    -- 性能优化 A 组：孤儿清理 + 车站对账合并为一次取数（原为两次独立调用，
+                    -- 一次取 getLines、另一次逐线 entityExists）。语义不变，只是少一轮引擎往返。
+                    -- 注意：pcall 返回 (ok, result) 两个值——ok 才是布尔，result 才是 stats 表，
+                    -- 只接第一个会把布尔当表索引 → "attempt to index local 'rc' (a boolean value)" 崩溃。
+                    local okM, guiRemoved, rc = pcall(timetable.maintainTimetableData)
+                    if okM then
+                        if guiRemoved and guiRemoved > 0 then
+                            timetableChanged = true
+                        end
+                        if rc and (rc.rekeyed or 0) + (rc.removed or 0) > 0 then
+                            timetableChanged = true
+                        end
+                    end
+                    -- 无条件重填车站 Tab 右侧表（若选中站）：即使 lineExists 因引擎缓存失效、
+                    -- cleanup 未删孤儿，重填时 fillStationTabLineTable/fillWaypointTabLineTable 的
+                    -- 显示层过滤（lineExists + getLineName=="ERROR"）也会跳过孤儿行，清除残留 ERROR。
+                    pcall(function()
+                        local selIdx = UIState.currentlySelectedStationTabStation
+                        local entry = selIdx and menu.stationTabEntryData and menu.stationTabEntryData[selIdx]
+                        if entry then
+                            if entry.type == "waypoint" then
+                                timetableGUI.fillWaypointTabLineTable(entry.gwKey)
+                            elseif entry.type == "station" then
+                                timetableGUI.fillStationTabLineTable(entry.id)
+                            end
+                        end
+                    end)
+                end
+            end
             -- 准点检测：GUI 线程每秒节流扫描（与 diagram_gui 同线程，_G 数据直接可见）
-            pcall(function() timetableGUI.updatePunctuality() end)
+            pcall(timetableGUI.updatePunctuality)
             if timetableChanged or _G._diagramForceSync then
                 _G._diagramForceSync = nil
                 pcall(function() game.interface.sendScriptEvent("timetableUpdate", "", timetable.getTimetableObject()) end)
@@ -1465,8 +2067,8 @@ function data()
                 clearConstraintWindowLaterHACK()
                 clearConstraintWindowLaterHACK = nil
             end
-            -- 中间站表摘要延迟刷新：SpinBox 输入停止约 1s 后重建中间表，让条件摘要显示新到发时间
-            if stationSummaryRefreshDue and timetableHelper.getTime() >= stationSummaryRefreshDue then
+            -- 中间站表摘要延迟刷新：SpinBox/名称输入停止约 1s 后重建中间表，让条件摘要显示新到发时间
+            if stationSummaryRefreshDue and realTimeNow() >= stationSummaryRefreshDue then
                 stationSummaryRefreshDue = nil
                 pcall(function()
                     if UIState.currentlySelectedLineTableIndex ~= nil and menu.stationTable then
@@ -1518,6 +2120,8 @@ function data()
                         end
                     end)
                     game.gui.boxLayout_addItem("gameInfo.layout", diagramButton.id)
+
+                    -- 交路系统按钮已移到独立 mod TrainRoute（其 game_script 的 guiUpdate 内创建）
 
                     -- add elements to ui
                     local gameInfo = api.gui.util.getById("gameInfo")
