@@ -549,6 +549,9 @@ end
 -- 归一化 currentlyWaiting 的停站条目（防御性：currentlyWaiting 会随存档持久化，
 -- 旧存档的停站条目可能缺失 outboundTime，或 outboundTime 是旧版"整站共享时间戳"的标量数字——
 -- 此时 stopData.outboundTime[vehicle] 写/读会崩溃（"attempt to index field 'outboundTime' (a nil value)"））。
+-- A carried delay older than this is ignored (vehicle stood in a depot, line was edited, ...).
+local VEHICLE_DELAY_MAX_AGE = 3 * 3600
+
 local function normalizeStopData(stopData)
     if type(stopData.currentlyWaiting) ~= "table" then stopData.currentlyWaiting = {} end
     if type(stopData.outboundTime) ~= "table" then stopData.outboundTime = {} end
@@ -700,21 +703,47 @@ function timetable.waitingRequired(vehicle)
                 end
             end
         end)
+        -- Delay the vehicle carried out of its previous timed stop on this line. Subtracting it
+        -- from the arrival gives the arrival "on schedule", so a delayed train is matched to its
+        -- own slot instead of being mistaken for an early train of a later slot.
+        local lineWaiting = currentlyWaiting[currentLineString]
+        if type(lineWaiting.vehicleDelay) ~= "table" then lineWaiting.vehicleDelay = {} end
+        local carriedDelay = 0
+        local delayRec = lineWaiting.vehicleDelay[vehicle]
+        if type(delayRec) == "table" and type(delayRec.delay) == "number" and type(delayRec.time) == "number"
+           and time - delayRec.time < VEHICLE_DELAY_MAX_AGE then
+            if arrivalSec and delayRec.time >= arrivalSec then
+                -- Recorded during this visit (re-evaluated after release): use the delay it arrived with.
+                carriedDelay = delayRec.inDelay or 0
+            else
+                carriedDelay = delayRec.delay
+            end
+        end
+
         -- 释放动作统一出口：到点发车=true → 强发；false → 仅普通放行（引擎装完关门才走，不掐装卸）。
-        local function releaseNow(forceIt)
+        -- refDep: the departure the train runs on; the delay against it is carried to the next stop.
+        local function releaseNow(forceIt, refDep)
             stopData.currentlyWaiting[vehicle] = nil
             stopData.outboundTime[vehicle] = time
+            if refDep then
+                lineWaiting.vehicleDelay[vehicle] = {
+                    delay = math.max(0, time - refDep), inDelay = carriedDelay, time = time,
+                }
+            end
             if forceIt then timetableHelper.forceDeparture(vehicle) end
         end
         -- Holds the train until the given departure. The target is stored so that the decision
         -- stays fixed while the train waits (it is not re-matched on every tick).
-        local function holdNow(dep, late)
+        -- slot = departure of the slot the train was matched to (differs from dep when it is
+        -- held for a later slot).
+        local function holdNow(dep, late, slot)
             local prev = stopData.currentlyWaiting[vehicle]
             stopData.currentlyWaiting[vehicle] = {
                 type = "ArrDep",
                 arrivalTime = (prev and prev.arrivalTime) or time,
                 dep = dep,
                 late = late,
+                slot = slot,
             }
         end
 
@@ -733,7 +762,7 @@ function timetable.waitingRequired(vehicle)
             if time < entry.dep then
                 if isLate and not forceDep and maxEn and arrivalSec and dwellMax
                    and time >= arrivalSec + dwellMax then
-                    releaseNow(true)
+                    releaseNow(true, entry.slot)
                     return false
                 end
                 return true
@@ -741,22 +770,22 @@ function timetable.waitingRequired(vehicle)
             missDep = entry.dep
             checkDelay = false
         else
-            -- Match the arrival to the closest slot. Falls back to the current time if the
-            -- arrival time is unavailable or implausible.
+            -- Match the arrival, minus the carried delay, to the closest slot. Falls back to the
+            -- current time if the arrival time is unavailable or implausible.
             local ref = time
             if arrivalSec and arrivalSec <= time and time - arrivalSec < 3600 then
                 ref = arrivalSec
             elseif entry and entry.arrivalTime then
                 ref = entry.arrivalTime
             end
-            local _, slotDep = timetable.assignSlot(constraints, ref)
+            local _, slotDep = timetable.assignSlot(constraints, ref - carriedDelay)
             if not slotDep then
                 releaseNow(false)
                 return false
             end
             if time < slotDep then
                 -- Early or on time: wait for the departure (with max dwell, released by ② at the point).
-                holdNow(slotDep, false)
+                holdNow(slotDep, false, slotDep)
                 return true
             end
             missDep = slotDep
@@ -773,31 +802,31 @@ function timetable.waitingRequired(vehicle)
         if not forceDep and maxEn and arrivalSec and dwellMax
            and time >= arrivalSec + dwellMax then
             -- ① 到站已满 M 秒仍滞留：无论超不超容差、装没装完，强发兜底（防死等/防无限装卸）
-            releaseNow(true)
+            releaseNow(true, missDep)
             return false
         end
         if checkDelay and tolerance > 0 and time - missDep > tolerance
            and timetable.getHoldLateEnabled(currentLine, currentStop) then
             -- 晚点超过判定标准：扣车到下一趟/下一周期（勾了 max 则到"到站+M"被 ① 强发）
-            holdNow(timetable.getNextDeparture(constraints, time), true)
+            holdNow(timetable.getNextDeparture(constraints, time), true, missDep)
             return true
         end
         -- 未设判定标准（无）或晚点在容差内：
         -- 到点发车关闭 + 最小停站时间未满 → 继续扣到 arrival+minWaitingTime 再放行
         if not forceDep and minEn and arrivalSec and dwellMin and time < arrivalSec + dwellMin then
-            holdNow(missDep, isLate)
+            holdNow(missDep, isLate, (entry and entry.slot) or missDep)
             return true
         end
         -- ② 到点强发：车到站早于该趟发车点（是"等点到"的车，不是"晚点到"的车）→ 勾了 max 强发；
         --    晚点到达、装完即走的车 → 走下面的普通放行（max 不兜此情形）
         if not forceDep and maxEn and arrivalSec and arrivalSec < missDep then
-            releaseNow(true)
+            releaseNow(true, missDep)
             return false
         end
         -- 到点发车（默认）→ 强发（必须无条件 forceDeparture：车首次到站从未被扣时
         -- 只 startVehicle 不会立即发车，会停在站里——AGENTS.md 2026-08-04 教训）；
         -- 到点发车关闭 → 普通放行（引擎装完关门才走，不掐装卸）。
-        releaseNow(forceDep)
+        releaseNow(forceDep, missDep)
         return false
 
 
@@ -1135,6 +1164,18 @@ function timetable.setRowSpacing(v)
     if not rowSpacingModes[v] then v = "equal" end
     timetableObject._diagramRowSpacing = v
     _G._diagramRowSpacing = v
+end
+
+-- Chart: show platform numbers above the dwell segments. Default on.
+-- Persisted in timetableObject (saved with the game) + _G (survives module reloads).
+function timetable.getShowPlatforms()
+    if _G._diagramShowPlatforms ~= nil then return _G._diagramShowPlatforms == true end
+    return timetableObject._diagramShowPlatforms ~= false
+end
+
+function timetable.setShowPlatforms(v)
+    timetableObject._diagramShowPlatforms = v == true
+    _G._diagramShowPlatforms = v == true
 end
 
 function timetable.setHasTimetable(line, bool)

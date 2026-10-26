@@ -156,4 +156,50 @@ function diagramLayout.rowYs(gaps, nRows, height, minFrac)
     return ys
 end
 
+-- Stroke font for short labels drawn with line segments (LineRenderView cannot show text).
+-- Glyphs are seven-segment digits plus "/", in a unit cell: x 0..1 left to right, y 0..1 top to bottom.
+local SEGMENTS = {
+    a = { 0, 0, 1, 0 }, b = { 1, 0, 1, 0.5 }, c = { 1, 0.5, 1, 1 }, d = { 0, 1, 1, 1 },
+    e = { 0, 0.5, 0, 1 }, f = { 0, 0, 0, 0.5 }, g = { 0, 0.5, 1, 0.5 },
+}
+local GLYPHS = {
+    ["0"] = "abcdef", ["1"] = "bc", ["2"] = "abged", ["3"] = "abgcd", ["4"] = "fgbc",
+    ["5"] = "afgcd", ["6"] = "afgedc", ["7"] = "abc", ["8"] = "abcdefg", ["9"] = "abcdfg",
+}
+
+---Width of a text drawn with textSegments.
+---@param text string
+---@param h number glyph height
+---@return number
+function diagramLayout.textWidth(text, h)
+    local n = #text
+    if n == 0 then return 0 end
+    return n * h * 0.5 + (n - 1) * h * 0.3
+end
+
+---Line segments that draw a text of digits and "/" (other characters leave a gap).
+---@param text string
+---@param x number left edge
+---@param y number top edge
+---@param h number glyph height (glyph width is h / 2)
+---@return table {{x1, y1, x2, y2}, ...}
+function diagramLayout.textSegments(text, x, y, h)
+    local res = {}
+    local w = h * 0.5
+    local cx = x
+    for i = 1, #text do
+        local ch = text:sub(i, i)
+        if ch == "/" then
+            res[#res + 1] = { cx + w, y, cx, y + h }
+        elseif GLYPHS[ch] then
+            for seg in GLYPHS[ch]:gmatch(".") do
+                local s = SEGMENTS[seg]
+                res[#res + 1] = { cx + s[1] * w, y + s[2] * h, cx + s[3] * w, y + s[4] * h }
+            end
+        end
+        cx = cx + w + h * 0.3
+    end
+    return res
+end
+
 return diagramLayout
