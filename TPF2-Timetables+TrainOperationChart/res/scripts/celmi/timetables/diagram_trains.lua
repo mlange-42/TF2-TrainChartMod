@@ -223,4 +223,70 @@ function diagramTrains.buildRuns(stations, legTimes, endAtLast)
     return runs
 end
 
+---Delay of a train standing at a stop, measured horizontally to the planned dwell segment:
+---0 inside [plArr, plDep], negative before the planned arrival, positive after the departure.
+---@param plArr number planned arrival, absolute seconds
+---@param plDep number planned departure, absolute seconds
+---@param now number
+---@return number delay seconds
+function diagramTrains.dwellDelay(plArr, plDep, now)
+    if now < plArr then return now - plArr end
+    if now > plDep then return now - plDep end
+    return 0
+end
+
+---The planned visits of a train from its departure at a stop up to the next line stop.
+---@param runs table runs from buildRuns
+---@param stations table flat stop list {isLineStop}
+---@param flatIdx number flat index of the stop the train departed from
+---@param plDep number planned departure there, absolute seconds (any hour)
+---@return table|nil visits {flatIdx, arr, dep}, shifted so the first departure equals plDep;
+---  the last one is the next line stop. nil if no run departs there at that time.
+function diagramTrains.legVisits(runs, stations, flatIdx, plDep)
+    for _, run in ipairs(runs) do
+        for vi, v in ipairs(run) do
+            if v.flatIdx == flatIdx and v.dep and (v.dep - plDep) % 3600 == 0 then
+                local shift = plDep - v.dep
+                local res = { { flatIdx = flatIdx, arr = v.arr and v.arr + shift, dep = plDep } }
+                for vj = vi + 1, #run do
+                    local w = run[vj]
+                    res[#res + 1] = { flatIdx = w.flatIdx, arr = w.arr and w.arr + shift,
+                        dep = w.dep and w.dep + shift }
+                    if stations[w.flatIdx].isLineStop then return res end
+                end
+                -- the last visit of a run (back at its start stop) has a departure too, but no
+                -- leg after it: keep looking for the run that starts with this departure
+            end
+        end
+    end
+    return nil
+end
+
+---Position of a running train on the planned polyline of its leg, assuming it keeps the delay
+---it departed with: the point the plan reaches at (now - delay). A train still on the leg after
+---the planned arrival waits at the end of the leg, and its delay grows.
+---@param pts table planned polyline {{t, y}, ...} in time order, from the departure to the
+---  arrival at the next stop
+---@param now number
+---@param delay number delay at the departure, seconds (negative = early)
+---@return number y
+---@return number delay current delay
+function diagramTrains.trainOnLeg(pts, now, delay)
+    local t = now - delay
+    local last = pts[#pts].t
+    if t > last then
+        t = last
+        delay = now - last
+    end
+    if t <= pts[1].t then return pts[1].y, delay end
+    for i = 2, #pts do
+        local a, b = pts[i - 1], pts[i]
+        if t <= b.t then
+            if b.t <= a.t then return b.y, delay end
+            return a.y + (b.y - a.y) * (t - a.t) / (b.t - a.t), delay
+        end
+    end
+    return pts[#pts].y, delay
+end
+
 return diagramTrains

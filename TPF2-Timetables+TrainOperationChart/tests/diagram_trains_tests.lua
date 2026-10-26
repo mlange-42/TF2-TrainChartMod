@@ -146,6 +146,48 @@ tests[#tests + 1] = function()
     assert(runs[1][2].arr == 160, "arr " .. tostring(runs[1][2].arr))
 end
 
+tests[#tests + 1] = function()
+    assert(diagramTrains.dwellDelay(100, 160, 90) == -10, "early")
+    assert(diagramTrains.dwellDelay(100, 160, 130) == 0, "inside the dwell")
+    assert(diagramTrains.dwellDelay(100, 160, 175) == 15, "overdue")
+end
+
+tests[#tests + 1] = function()
+    -- A dep 01:00 -> w 02:00 -> B arr 04:00; leg found for a departure one hour later
+    local st = { station(1, "A", {{0, 0, 1, 0}}), waypoint(1, "w", {{2, 0, 2, 0}}),
+        station(2, "B", {{4, 0, 5, 0}}) }
+    local runs = diagramTrains.buildRuns(st, { 240, 240 })
+    local leg = diagramTrains.legVisits(runs, st, 1, 3660)
+    assert(leg and #leg == 3, "A, w, B")
+    assert(leg[1].dep == 3660 and leg[2].arr == 3720 and leg[3].arr == 3840)
+    assert(diagramTrains.legVisits(runs, st, 1, 90) == nil, "no run departs at 01:30")
+    -- leg out of B ends at A again
+    leg = diagramTrains.legVisits(runs, st, 3, 300)
+    assert(leg and #leg == 2 and leg[2].flatIdx == 1)
+end
+
+tests[#tests + 1] = function()
+    -- two slots at A: the run starting at 01:00 ends back at A on the 31:00 slot. That last
+    -- visit must not hide the run that starts at 31:00.
+    local st = { station(1, "A", {{0, 0, 1, 0}, {30, 0, 31, 0}}), station(2, "B", {{10, 0, 11, 0}, {40, 0, 41, 0}}) }
+    local runs = diagramTrains.buildRuns(st, { 540, 1140 })
+    assert(runs[1][#runs[1]].dep % 3600 == 1860, "first run ends on the 31:00 slot")
+    local leg = diagramTrains.legVisits(runs, st, 1, 1860)
+    assert(leg and #leg == 2 and leg[2].flatIdx == 2 and leg[2].arr == 2400, "leg of the run starting at 31:00")
+end
+
+tests[#tests + 1] = function()
+    local pts = { {t = 100, y = 0}, {t = 200, y = 50}, {t = 200, y = 50}, {t = 300, y = 100} }
+    local y, d = diagramTrains.trainOnLeg(pts, 150, 0)
+    assert(y == 25 and d == 0, "on time, halfway along the first segment")
+    y, d = diagramTrains.trainOnLeg(pts, 270, 20)
+    assert(y == 75 and d == 20, "keeps the departure delay")
+    y, d = diagramTrains.trainOnLeg(pts, 330, 0)
+    assert(y == 100 and d == 30, "overdue: waits at the end, delay grows")
+    y, d = diagramTrains.trainOnLeg(pts, 120, 20)
+    assert(y == 0 and d == 20, "just departed late")
+end
+
 return {
     test = function()
         for k, v in pairs(tests) do

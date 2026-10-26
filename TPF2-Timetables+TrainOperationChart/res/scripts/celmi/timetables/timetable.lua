@@ -1187,6 +1187,18 @@ function timetable.setShowPlatforms(v)
     _G._diagramShowPlatforms = v == true
 end
 
+-- Chart: overlay of the vehicles' current positions and delays. Default on.
+-- Persisted like the platform numbers setting.
+function timetable.getShowVehicles()
+    if _G._diagramShowVehicles ~= nil then return _G._diagramShowVehicles == true end
+    return timetableObject._diagramShowVehicles ~= false
+end
+
+function timetable.setShowVehicles(v)
+    timetableObject._diagramShowVehicles = v == true
+    _G._diagramShowVehicles = v == true
+end
+
 function timetable.setHasTimetable(line, bool)
     if timetableObject[tostring(line)] then
         timetableObject[tostring(line)].hasTimetable = bool
