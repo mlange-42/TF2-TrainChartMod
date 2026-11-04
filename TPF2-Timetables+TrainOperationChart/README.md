@@ -1,6 +1,6 @@
-[![CI](https://github.com/1122Q-Q/Railway-Timetable-with-Transport-Fever-2/actions/workflows/blank.yml/badge.svg)](https://github.com/1122Q-Q/Railway-Timetable-with-Transport-Fever-2/actions/workflows/blank.yml)
-
 # TPF2 Timetables & Train Operation Chart
+
+[![Tests](https://github.com/mlange-42/TF2-TrainChartMod/actions/workflows/tests.yml/badge.svg)](https://github.com/mlange-42/TF2-TrainChartMod/actions/workflows/tests.yml)
 
 A Transport Fever 2 mod that adds **timetables** and a **train operation chart** (running diagram / 运行图 / Bildfahrplan) to the game.
 
